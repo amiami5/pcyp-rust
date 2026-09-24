@@ -254,6 +254,12 @@ pub struct ViewConfig {
     pub column_widths: std::collections::BTreeMap<String, f32>,
     /// 閉じたときの窓の位置と大きさ (スクリーンのピクセルで [左, 上, 右, 下])。次の起動でここに開く
     pub window_rect: Option<[i32; 4]>,
+    /// 並べ替えの基準 (listeners, name, genre, bitrate, uptime, type, yp, random)
+    pub sort_key: String,
+    /// 大きい順 (文字列なら逆順)
+    pub sort_desc: bool,
+    /// お気に入りを上にまとめる
+    pub favorites_first: bool,
     pub window_size: Option<[f32; 2]>,
 }
 
@@ -272,6 +278,9 @@ impl Default for ViewConfig {
             show_tooltips: false,
             column_widths: Default::default(),
             window_rect: None,
+            sort_key: "listeners".into(),
+            sort_desc: true,
+            favorites_first: false,
             window_size: None,
         }
     }

@@ -37,10 +37,13 @@ enum SortKey {
     Type,
     Yp,
     Genre,
+    /// 更新のたびに並びが変わる
+    Random,
 }
 
 impl SortKey {
-    const ALL: [(SortKey, &'static str); 7] = [
+    /// 列で並べ替えるときの選択肢
+    const COLUMNS: [(SortKey, &'static str); 7] = [
         (SortKey::Listeners, "リスナー"),
         (SortKey::Name, "名前"),
         (SortKey::Genre, "ジャンル"),
@@ -54,7 +57,45 @@ impl SortKey {
     fn default_desc(self) -> bool {
         matches!(self, SortKey::Listeners | SortKey::Bitrate | SortKey::Uptime)
     }
+
+    /// 設定に保存するときの名前
+    fn key(self) -> &'static str {
+        match self {
+            SortKey::Listeners => "listeners",
+            SortKey::Name => "name",
+            SortKey::Bitrate => "bitrate",
+            SortKey::Uptime => "uptime",
+            SortKey::Type => "type",
+            SortKey::Yp => "yp",
+            SortKey::Genre => "genre",
+            SortKey::Random => "random",
+        }
+    }
+
+    fn from_key(s: &str) -> SortKey {
+        [
+            SortKey::Listeners,
+            SortKey::Name,
+            SortKey::Bitrate,
+            SortKey::Uptime,
+            SortKey::Type,
+            SortKey::Yp,
+            SortKey::Genre,
+            SortKey::Random,
+        ]
+        .into_iter()
+        .find(|k| k.key() == s)
+        .unwrap_or(SortKey::Listeners)
+    }
 }
+
+/// 並べ替えのメニューの決まった組み合わせ (基準、大きい順、お気に入りを上に)
+const SORT_PRESETS: [(&str, SortKey, bool, bool); 4] = [
+    ("リスナー > お気に入り", SortKey::Listeners, true, false),
+    ("お気に入り > リスナー", SortKey::Listeners, true, true),
+    ("配信時間 > リスナー", SortKey::Uptime, true, false),
+    ("ランダム", SortKey::Random, false, false),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Col {
@@ -198,6 +239,9 @@ struct Row {
     yp: String,
     /// 当たったフィルターの名前
     filters: Vec<String>,
+    /// 当たったお気に入り / 無視のフィルターの番号
+    fav_filters: Vec<usize>,
+    ign_filters: Vec<usize>,
     favorite: bool,
     ignore: bool,
     color: Option<Color32>,
@@ -220,6 +264,8 @@ enum Action {
     OpenUrl(String),
     AddFilter(String, bool),
     RemoveFilter(usize),
+    /// フィルターの画面を開いて、この番号のフィルターを選ぶ
+    EditFilter(usize),
     Bump(String),
     Stop(String),
 }
@@ -244,6 +290,8 @@ struct SettingsDlg {
 struct FilterDlg {
     filters: Vec<Filter>,
     sel: usize,
+    /// 次の描画で、選んだフィルターが見えるまで一覧をスクロールする
+    scroll_to_sel: bool,
 }
 
 #[derive(Default)]
@@ -275,6 +323,8 @@ pub struct App {
     tab: Tab,
     search: String,
     sort: (SortKey, bool),
+    /// お気に入りを上にまとめる
+    fav_first: bool,
     selected: Option<String>,
     rows: Vec<Row>,
     view: Vec<usize>,
@@ -349,7 +399,8 @@ impl App {
             notices: init.notices,
             tab: Tab::All,
             search: String::new(),
-            sort: (SortKey::Listeners, true),
+            sort: (SortKey::from_key(&cfg.view.sort_key), cfg.view.sort_desc),
+            fav_first: cfg.view.favorites_first,
             selected: None,
             rows: Vec::new(),
             view: Vec::new(),
@@ -466,6 +517,8 @@ impl App {
                     color: color_of(&m.colors),
                     is_new: s.new_keys.contains(&key),
                     filters: m.names.clone(),
+                    fav_filters: m.favorite_filters.clone(),
+                    ign_filters: m.ignore_filters.clone(),
                     duplicate,
                 });
             }
@@ -479,7 +532,7 @@ impl App {
     }
 
     fn rebuild_view(&mut self, cfg: &Config) {
-        let key = format!("{:?}|{}|{:?}|{}", self.tab, self.search, self.sort, cfg.view.show_info_rows);
+        let key = format!("{:?}|{}|{:?}|{}|{}", self.tab, self.search, self.sort, self.fav_first, cfg.view.show_info_rows);
         if key == self.view_key {
             return;
         }
@@ -511,9 +564,23 @@ impl App {
             })
             .collect();
         let (key, desc) = self.sort;
+        let fav_first = self.fav_first;
+        let generation = self.rows_gen;
         let rows = &self.rows;
+        // ランダムは、取得のたびに並びが変わり、その間は同じ並びのまま
+        let random = |r: &Row| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (r.ch.key(), &r.yp, generation).hash(&mut h);
+            h.finish()
+        };
         v.sort_by(|&a, &b| {
             let (a, b) = (&rows[a], &rows[b]);
+            // 1. お気に入りを上に (選んでいれば)
+            if fav_first && a.favorite != b.favorite {
+                return b.favorite.cmp(&a.favorite);
+            }
+            // 2. 選んだ基準
             let o = match key {
                 SortKey::Listeners => a.ch.listeners.cmp(&b.ch.listeners).then(a.ch.relays.cmp(&b.ch.relays)),
                 SortKey::Name => a.ch.name.to_lowercase().cmp(&b.ch.name.to_lowercase()),
@@ -522,8 +589,11 @@ impl App {
                 SortKey::Uptime => a.ch.uptime_minutes().cmp(&b.ch.uptime_minutes()),
                 SortKey::Type => a.ch.content_type.cmp(&b.ch.content_type),
                 SortKey::Yp => a.yp.cmp(&b.yp),
+                SortKey::Random => random(a).cmp(&random(b)),
             };
-            if desc { o.reverse() } else { o }
+            let o = if desc { o.reverse() } else { o };
+            // 3. 同じなら、お気に入りを上に、そのあとリスナーの多い順
+            o.then(b.favorite.cmp(&a.favorite)).then(b.ch.listeners.cmp(&a.ch.listeners))
         });
         self.view = v;
     }
@@ -620,11 +690,6 @@ impl App {
         });
     }
 
-    fn exact_filter_index(&self, name: &str) -> Option<usize> {
-        let target = Filter::exact_name(name, false).base_search.search;
-        read(&self.filters).iter().position(|f| f.base_search.search == target && f.base_search.fields == ["name"])
-    }
-
     fn do_actions(&mut self, actions: Vec<Action>) {
         for a in actions {
             match a {
@@ -649,6 +714,13 @@ impl App {
                         self.save_filters(f);
                     }
                 }
+                Action::EditFilter(i) => match self.filter_dlg.as_mut() {
+                    Some(dlg) => {
+                        dlg.sel = i.min(dlg.filters.len().saturating_sub(1));
+                        dlg.scroll_to_sel = true;
+                    }
+                    None => self.filter_dlg = Some(FilterDlg { filters: read(&self.filters), sel: i, scroll_to_sel: true }),
+                },
                 Action::Bump(id) => self.spawn_rpc("再接続", move |r| r.bump_channel(&id)),
                 Action::Stop(id) => self.spawn_rpc("チャンネルを停止", move |r| r.stop_channel(&id)),
             }
@@ -672,9 +744,10 @@ impl App {
                 self.open_settings_dialog(cfg);
             }
             if ui.button("★ フィルター").on_hover_text("お気に入り・無視・色分け").clicked() && self.filter_dlg.is_none() {
-                self.filter_dlg = Some(FilterDlg { filters: read(&self.filters), sel: 0 });
+                self.filter_dlg = Some(FilterDlg { filters: read(&self.filters), sel: 0, scroll_to_sel: false });
             }
             self.view_menu(ui, cfg);
+            self.sort_menu(ui);
             self.peercast_menu(ui, cfg);
             if ui.selectable_label(self.show_log, "📋 ログ").clicked() {
                 self.show_log = !self.show_log;
@@ -710,16 +783,6 @@ impl App {
             ui.checkbox(&mut c.content_type, "種類");
             ui.checkbox(&mut c.track, "トラック");
             ui.checkbox(&mut c.yp, "YP");
-            ui.separator();
-            ui.menu_button("並べ替え", |ui| {
-                for (k, label) in SortKey::ALL {
-                    let mark = if self.sort.0 == k { if self.sort.1 { " ▼" } else { " ▲" } } else { "" };
-                    if ui.button(format!("{}{}", label, mark)).clicked() {
-                        self.set_sort(k);
-                        ui.close();
-                    }
-                }
-            });
         });
         if v != cfg.view {
             let mut new = cfg.clone();
@@ -747,6 +810,31 @@ impl App {
                 }
                 ui.close();
             }
+        });
+    }
+
+    /// 並べ替えのメニュー。決まった組み合わせと、お気に入りを上に、列での並べ替え
+    fn sort_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("並べ替え", |ui| {
+            for (label, key, desc, fav) in SORT_PRESETS {
+                let current = self.sort == (key, desc) && self.fav_first == fav;
+                if ui.radio(current, label).clicked() {
+                    self.sort = (key, desc);
+                    self.fav_first = fav;
+                    ui.close();
+                }
+            }
+            ui.separator();
+            ui.checkbox(&mut self.fav_first, "お気に入りを上に表示");
+            ui.menu_button("列で並べ替え", |ui| {
+                for (k, label) in SortKey::COLUMNS {
+                    let mark = if self.sort.0 == k { if self.sort.1 { " ▼" } else { " ▲" } } else { "" };
+                    if ui.button(format!("{}{}", label, mark)).clicked() {
+                        self.set_sort(k);
+                        ui.close();
+                    }
+                }
+            });
         });
     }
 
@@ -1024,24 +1112,23 @@ impl App {
             }
         });
         ui.separator();
-        match self.exact_filter_index(&c.name) {
-            Some(fi) => {
-                let ignore = read(&self.filters).get(fi).is_some_and(|f| f.ignore);
-                if ui.button(if ignore { "無視をやめる" } else { "お気に入りから外す" }).clicked() {
-                    actions.push(Action::RemoveFilter(fi));
-                    ui.close();
-                }
+        // 実際に当たっているフィルターを見て、追加か外すかを出す
+        let filters = read(&self.filters);
+        if r.fav_filters.is_empty() {
+            if !r.ignore && ui.button("★ お気に入りに追加").clicked() {
+                actions.push(Action::AddFilter(c.name.clone(), false));
+                ui.close();
             }
-            None => {
-                if ui.button("★ お気に入りに追加").clicked() {
-                    actions.push(Action::AddFilter(c.name.clone(), false));
-                    ui.close();
-                }
-                if ui.button("🚫 無視に追加").clicked() {
-                    actions.push(Action::AddFilter(c.name.clone(), true));
-                    ui.close();
-                }
+        } else {
+            remove_filter_menu(ui, "★ お気に入りから外す", &r.fav_filters, &filters, &c.name, actions);
+        }
+        if r.ign_filters.is_empty() {
+            if !r.favorite && ui.button("🚫 無視に追加").clicked() {
+                actions.push(Action::AddFilter(c.name.clone(), true));
+                ui.close();
             }
+        } else {
+            remove_filter_menu(ui, "🚫 無視をやめる", &r.ign_filters, &filters, &c.name, actions);
         }
         ui.separator();
         ui.add_enabled_ui(!c.is_info(), |ui| {
@@ -1173,7 +1260,8 @@ impl App {
                 }
                 if resp.double_clicked() {
                     actions.push(Action::Play(i));
-                } else if resp.clicked() || resp.secondary_clicked() {
+                } else if resp.clicked() {
+                    // 右クリックでは選ばない (選ぶと下に情報欄が出て表が動き、開いたメニューが閉じてしまう)
                     actions.push(Action::Select(i));
                 }
                 // 省略された文字は、egui が全文の吹き出しを出すので、行には吹き出しを付けない
@@ -1408,7 +1496,7 @@ impl App {
         let mut open = true;
         let mut apply = None;
         let mut cancel = false;
-        sub_window(ctx, "filters", "フィルター (お気に入り・無視・色分け)", [760.0, 520.0], &mut open, |ui| {
+        sub_window(ctx, "filters", "フィルター (お気に入り・無視・色分け)", [900.0, 560.0], &mut open, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("追加").clicked() {
                     dlg.filters.push(Filter::default());
@@ -1434,6 +1522,8 @@ impl App {
                 ui.set_max_height(height);
                 egui::ScrollArea::vertical().id_salt("flist").max_height(height).max_width(200.0).auto_shrink([false, false]).show(ui, |ui| {
                     ui.set_width(190.0);
+                    // 横並びの中にあるので、一覧は縦に並べる
+                    ui.vertical(|ui| {
                     for (i, f) in dlg.filters.iter().enumerate() {
                         let mark = if f.ignore { "🚫" } else if f.favorite { "★" } else { "🎨" };
                         let title = if f.title().is_empty() { "(新しいフィルター)" } else { f.title() };
@@ -1441,10 +1531,15 @@ impl App {
                         if !f.enabled {
                             text = text.weak().strikethrough();
                         }
-                        if ui.selectable_label(dlg.sel == i, text).clicked() {
+                        let r = ui.selectable_label(dlg.sel == i, text);
+                        if r.clicked() {
                             dlg.sel = i;
                         }
+                        if dlg.sel == i && std::mem::take(&mut dlg.scroll_to_sel) {
+                            r.scroll_to_me(Some(Align::Center));
+                        }
                     }
+                    });
                 });
                 ui.separator();
                 ui.vertical(|ui| {
@@ -1542,6 +1637,39 @@ fn sub_window(ctx: &egui::Context, id: &str, title: &str, size: [f32; 2], open: 
             *open = false;
         }
         egui::CentralPanel::default().show(ui, |ui| add(ui));
+    });
+}
+
+/// お気に入りから外す / 無視をやめるのメニュー。
+///
+/// このチャンネル名だけのフィルター 1 つに当たっているなら、押すとそのまま外す。
+/// それ以外 (複数の名前をまとめたフィルターなど) は、フィルターごとの削除と、フィルターの編集を選ばせる。
+fn remove_filter_menu(ui: &mut egui::Ui, label: &str, hit: &[usize], filters: &[Filter], name: &str, actions: &mut Vec<Action>) {
+    let exact = Filter::exact_name(name, false).base_search.search;
+    let only_exact = hit.len() == 1 && filters.get(hit[0]).is_some_and(|f| f.base_search.search == exact);
+    if only_exact {
+        if ui.button(label).clicked() {
+            actions.push(Action::RemoveFilter(hit[0]));
+            ui.close();
+        }
+        return;
+    }
+    ui.menu_button(label, |ui| {
+        for &i in hit {
+            let Some(f) = filters.get(i) else { continue };
+            let resp = ui
+                .button(format!("フィルター「{}」を削除", f.title()))
+                .on_hover_text(format!("条件: {}\nこのフィルターに当たるほかのチャンネルも外れます", f.base_search.search));
+            if resp.clicked() {
+                actions.push(Action::RemoveFilter(i));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button("フィルターを編集…").on_hover_text("条件から、このチャンネルの名前だけを消せます").clicked() {
+            actions.push(Action::EditFilter(hit[0]));
+            ui.close();
+        }
     });
 }
 
@@ -2020,6 +2148,15 @@ impl eframe::App for App {
         self.filter_window(&ctx);
         self.log_window(&ctx);
         self.relay_window(&ctx);
+
+        // 並べ替えを変えたら、次の起動でも同じ順になるよう保存する
+        if cfg.view.sort_key != self.sort.0.key() || cfg.view.sort_desc != self.sort.1 || cfg.view.favorites_first != self.fav_first {
+            let mut new = self.cfg();
+            new.view.sort_key = self.sort.0.key().to_string();
+            new.view.sort_desc = self.sort.1;
+            new.view.favorites_first = self.fav_first;
+            self.apply_config(&ctx, new);
+        }
 
         // 次の自動更新までの表示のため
         ctx.request_repaint_after(Duration::from_secs(1));

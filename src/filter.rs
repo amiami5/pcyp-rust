@@ -95,6 +95,8 @@ struct CompiledSearch {
 }
 
 pub struct CompiledFilter {
+    /// 元のフィルターの並びの中での位置
+    pub index: usize,
     /// 一覧に出す名前 (フィルターの名前、なければ条件)
     pub title: String,
     pub favorite: bool,
@@ -115,6 +117,9 @@ pub struct MatchResult {
     pub colors: Vec<[u8; 3]>,
     /// 当たったフィルターの名前
     pub names: Vec<String>,
+    /// 当たったお気に入り / 無視のフィルターの位置 (元の並びの中での番号)
+    pub favorite_filters: Vec<usize>,
+    pub ignore_filters: Vec<usize>,
 }
 
 fn compile_search(s: &Search, ignore_case: bool) -> Result<CompiledSearch, String> {
@@ -131,7 +136,7 @@ fn compile_search(s: &Search, ignore_case: bool) -> Result<CompiledSearch, Strin
 pub fn compile(filters: &[Filter]) -> (Vec<CompiledFilter>, Vec<String>) {
     let mut out = Vec::new();
     let mut errors = Vec::new();
-    for f in filters {
+    for (index, f) in filters.iter().enumerate() {
         if !f.enabled {
             continue;
         }
@@ -143,6 +148,7 @@ pub fn compile(filters: &[Filter]) -> (Vec<CompiledFilter>, Vec<String>) {
             let and = if f.and_search.enabled { Some(compile_search(&f.and_search, f.ignore_case)?) } else { None };
             let not = if f.not_search.enabled { Some(compile_search(&f.not_search, f.ignore_case)?) } else { None };
             Ok(CompiledFilter {
+                index,
                 title: f.title().to_string(),
                 favorite: f.favorite,
                 ignore: f.ignore,
@@ -201,6 +207,12 @@ pub fn apply(filters: &[CompiledFilter], c: &Channel, yp: &str) -> MatchResult {
             if !r.names.contains(&f.title) {
                 r.names.push(f.title.clone());
             }
+            if f.favorite {
+                r.favorite_filters.push(f.index);
+            }
+            if f.ignore {
+                r.ignore_filters.push(f.index);
+            }
         }
     }
     r
@@ -239,6 +251,8 @@ mod tests {
         assert!(apply(&c, &ch("a.b", ""), "").ignore);
         assert!(!apply(&c, &ch("axb", ""), "").ignore);
         assert_eq!(apply(&c, &ch("a.b", ""), "").names, ["a.b"]);
+        // 無効な 1 件目を飛ばしても、番号は元の並びのまま
+        assert_eq!(apply(&c, &ch("a.b", ""), "").ignore_filters, [1]);
     }
 
     #[test]
