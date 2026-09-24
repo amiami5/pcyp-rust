@@ -743,10 +743,27 @@ impl App {
         let errors = s.yps.iter().filter(|y| matches!(y.state, FetchState::Error(_))).count();
         let last_log = s.log.back().cloned();
         drop(s);
+        // 右端にバージョン (Cargo.toml の version) を出し、残りの幅に今の状態を並べる
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).weak());
+            ui.separator();
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| self.status_items(ui, cfg, last_update, next, errors, last_log));
+        });
+    }
+
+    fn status_items(
+        &mut self,
+        ui: &mut egui::Ui,
+        cfg: &Config,
+        last_update: Option<String>,
+        next: Option<u64>,
+        errors: usize,
+        last_log: Option<crate::worker::LogLine>,
+    ) {
         let pc = self.pc_status.lock().unwrap_or_else(|e| e.into_inner());
         let (running, agent) = (pc.running, pc.agent.clone());
         drop(pc);
-        ui.horizontal(|ui| {
+        {
             ui.label(format!("{} ch", self.view.len()));
             ui.separator();
             if let Some(t) = last_update {
@@ -776,7 +793,7 @@ impl App {
                     self.show_log = true;
                 }
             }
-        });
+        }
     }
 
     fn name_text(&self, ui: &egui::Ui, r: &Row) -> RichText {

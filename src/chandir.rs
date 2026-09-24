@@ -154,7 +154,7 @@ pub fn parse_index(text: &str, feed_url: &str) -> (Vec<Channel>, Vec<usize>) {
         });
     }
     // 聴取者の多い順 (同じ数なら元の順)
-    chans.sort_by(|a, b| b.listeners.cmp(&a.listeners));
+    chans.sort_by_key(|c| std::cmp::Reverse(c.listeners));
     (chans, errors)
 }
 
