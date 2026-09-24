@@ -1339,6 +1339,9 @@ impl App {
 
 /// メインとは別の OS のウィンドウを開く (自由に移動・サイズ変更できる)。閉じるボタンで `open` を false にする。
 fn sub_window(ctx: &egui::Context, id: &str, title: &str, size: [f32; 2], open: &mut bool, mut add: impl FnMut(&mut egui::Ui)) {
+    if !*open {
+        return;
+    }
     let builder = egui::ViewportBuilder::default()
         .with_title(title)
         .with_inner_size(size)
@@ -1563,20 +1566,25 @@ fn settings_player(ui: &mut egui::Ui, cfg: &mut Config) {
     let n = cfg.players.len();
     for (i, p) in cfg.players.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            egui::Grid::new(("player", i)).num_columns(2).show(ui, |ui| {
-                ui.label("種類");
-                ui.horizontal(|ui| {
-                    ui.add_sized([140.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut p.types));
-                    if ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked() {
-                        swap = Some((i, i - 1));
-                    }
-                    if ui.add_enabled(i + 1 < n, egui::Button::new("↓").small()).clicked() {
-                        swap = Some((i, i + 1));
-                    }
-                    if ui.small_button("削除").clicked() {
+            ui.set_width(ui.available_width());
+            // 見出しの行: 右上に並べ替えと削除 (×)
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("プレイヤー {}", i + 1)).strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("✖").on_hover_text("このプレイヤーを削除").clicked() {
                         remove = Some(i);
                     }
+                    if ui.add_enabled(i + 1 < n, egui::Button::new("↓").small()).on_hover_text("下へ").clicked() {
+                        swap = Some((i, i + 1));
+                    }
+                    if ui.add_enabled(i > 0, egui::Button::new("↑").small()).on_hover_text("上へ").clicked() {
+                        swap = Some((i, i - 1));
+                    }
                 });
+            });
+            egui::Grid::new(("player", i)).num_columns(2).show(ui, |ui| {
+                ui.label("種類");
+                ui.add_sized([140.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut p.types));
                 ui.end_row();
                 ui.label("プレイヤー");
                 ui.horizontal(|ui| {
