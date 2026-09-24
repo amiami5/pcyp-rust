@@ -106,6 +106,33 @@ mod imp {
     }
 
     /// 窓の通常の位置と大きさを変える。見えていない窓は見えないまま (表示されたときにその位置に出る)。
+    /// exe に埋め込んだアイコン (src/build.rs のリソース番号 1) を、窓と窓の種類 (ウィンドウクラス) に付ける。
+    ///
+    /// タスクマネージャーなどは窓の種類のアイコンを見るが、winit が作る窓の種類にはアイコンがなく、
+    /// 標準のアイコンが出ていた。画面の拡大率に合った大きさで読み込むので、タイトルバーなどもくっきりする。
+    pub fn apply_exe_icon() {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+        let Some(h) = hwnd() else { return };
+        let dpi = match unsafe { GetDpiForWindow(h) } {
+            0 => 96,
+            d => d as i32,
+        };
+        let inst = unsafe { GetModuleHandleW(std::ptr::null()) };
+        let load = |size: i32| unsafe { LoadImageW(inst, 1 as windows_sys::core::PCWSTR, IMAGE_ICON, size, size, LR_DEFAULTCOLOR) };
+        let (big, small) = (load(32 * dpi / 96), load(16 * dpi / 96));
+        unsafe {
+            if !big.is_null() {
+                SendMessageW(h, WM_SETICON, ICON_BIG as usize, big as isize);
+                SetClassLongPtrW(h, GCLP_HICON, big as isize);
+            }
+            if !small.is_null() {
+                SendMessageW(h, WM_SETICON, ICON_SMALL as usize, small as isize);
+                SetClassLongPtrW(h, GCLP_HICONSM, small as isize);
+            }
+        }
+    }
+
     pub fn set_window_rect(r: [i32; 4]) {
         let Some(h) = hwnd() else { return };
         let Some(mut wp) = placement(h) else { return };
@@ -147,13 +174,16 @@ mod imp {
     pub fn window_rect() -> Option<[i32; 4]> {
         None
     }
+    pub fn apply_exe_icon() {}
     pub fn set_window_rect(_r: [i32; 4]) {}
     pub fn rect_is_on_screen(_r: [i32; 4]) -> bool {
         false
     }
 }
 
-pub use imp::{hide_window, is_window_visible, post_close, rect_is_on_screen, set_window_rect, show_window, window_rect};
+pub use imp::{
+    apply_exe_icon, hide_window, is_window_visible, post_close, rect_is_on_screen, set_window_rect, show_window, window_rect,
+};
 
 /// 画面の中にあるかを調べるときの、タイトルバーのあたりの高さ (ピクセル)
 const TITLE_STRIP: i32 = 30;

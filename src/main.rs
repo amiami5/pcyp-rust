@@ -119,6 +119,7 @@ fn main() -> eframe::Result {
                 && let RawWindowHandle::Win32(w) = h.as_raw()
             {
                 win::set_main_window(w.hwnd.get(), ctx.clone());
+                win::apply_exe_icon();
                 // 前回閉じた位置に開く。モニターを外したなどで画面の外になるなら、使わずにふつうの位置で開く
                 if let Some(r) = cfg.view.window_rect {
                     if win::rect_is_on_screen(r) {
