@@ -1511,6 +1511,10 @@ impl App {
                 if let Some(s) = self.last_size {
                     c.view.window_size = Some(s);
                 }
+                // 閉じた位置を覚えて、次の起動でそこに開く
+                if let Some(r) = win::window_rect() {
+                    c.view.window_rect = Some(r);
+                }
                 if let Err(e) = config::save_json(config::CONFIG_FILE, &c) {
                     eprintln!("{}", e);
                 }

@@ -252,6 +252,8 @@ pub struct ViewConfig {
     pub show_tooltips: bool,
     /// 一覧の列の幅 (境目の線を動かして変えたもの)。列の名前ごと
     pub column_widths: std::collections::BTreeMap<String, f32>,
+    /// 閉じたときの窓の位置と大きさ (スクリーンのピクセルで [左, 上, 右, 下])。次の起動でここに開く
+    pub window_rect: Option<[i32; 4]>,
     pub window_size: Option<[f32; 2]>,
 }
 
@@ -269,6 +271,7 @@ impl Default for ViewConfig {
             scroll_rows: 2,
             show_tooltips: false,
             column_widths: Default::default(),
+            window_rect: None,
             window_size: None,
         }
     }

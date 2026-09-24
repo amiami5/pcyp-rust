@@ -18,7 +18,7 @@ serde_json = "1.0.151"
 tauri-winrt-notification = "0.8.1"
 tray-icon = "0.25.1"
 ureq = "3.4.2"
-windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Shell", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Shell", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_Security", "Win32_Graphics_Gdi"] }
 
 [profile.release]
 opt-level = 3

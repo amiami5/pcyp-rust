@@ -118,6 +118,14 @@ fn main() -> eframe::Result {
                 && let RawWindowHandle::Win32(w) = h.as_raw()
             {
                 win::set_main_window(w.hwnd.get(), ctx.clone());
+                // 前回閉じた位置に開く。モニターを外したなどで画面の外になるなら、使わずにふつうの位置で開く
+                if let Some(r) = cfg.view.window_rect {
+                    if win::rect_is_on_screen(r) {
+                        win::set_window_rect(r);
+                    } else {
+                        worker::lock(&shared).log(false, "前回の窓の位置は画面の外になるので、ふつうの位置で開きました");
+                    }
+                }
             }
             let open_settings = Arc::new(AtomicBool::new(false));
             let tray = if cfg.tray.enabled {
