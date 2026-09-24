@@ -31,6 +31,11 @@ http://127.0.0.1:7144/stream/<ID><拡張子>?tip=<トラッカー>
 設定で `/pls/<ID>?tip=...` (プレイリスト) に切り替えられます。どちらも PeerCast YT と
 PeerCastStation の両方で使える形です。
 
+PeerCast のアドレスは `ホスト:ポート` の形で 1 つの欄に入れます (例 `127.0.0.1:7144`、`192.168.1.10:7144`、`[::1]:7144`)。
+LAN の別の PC の PeerCast でも、一覧の取得と再生に認証は要りません。
+「接続中のチャンネル」「停止」「再接続」(JSON-RPC) は、PeerCast YT が localhost 以外からの操作にログインを求めるので、
+PeerCast の管理画面のパスワードを設定に入れてください。
+
 ## ビルド
 
 ```
@@ -57,6 +62,14 @@ cargo test
 ```
 
 テストでは実際の YP にはつなぎません (固定の行とローカルの HTTP サーバーを使います)。
+
+実際の PeerCast につなぐテストは、ふだんは飛ばします。アドレスを環境変数で渡すと動きます。
+
+```
+PCYP_TEST_PEERCAST=ホスト:ポート cargo test live_peercast -- --ignored --nocapture
+```
+
+`PCYP_TEST_PEERCAST_PASS` にパスワードを入れると、`getChannels` も確かめます。
 
 ## ライセンス
 

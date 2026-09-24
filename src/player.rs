@@ -2,12 +2,11 @@
 
 use crate::chandir::{self, Channel};
 use crate::config::{Config, PeerCastConfig, PlayUrlKind};
-use crate::peercast::host_for_url;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn base(pc: &PeerCastConfig) -> String {
-    format!("http://{}:{}", host_for_url(&pc.host), pc.port)
+    pc.base_url()
 }
 
 fn tip_query(c: &Channel) -> String {

@@ -103,7 +103,7 @@ fn main() -> eframe::Result {
         .with_title(config::APP_NAME)
         .with_inner_size(size)
         .with_min_inner_size([360.0, 240.0])
-        .with_icon(Arc::new(egui::IconData { rgba: win::icon_rgba(64), width: 64, height: 64 }))
+        .with_icon(win::app_icon())
         .with_visible(!hide_on_start);
     let options = eframe::NativeOptions { viewport, ..Default::default() };
 

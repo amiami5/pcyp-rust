@@ -749,9 +749,9 @@ impl App {
             }
             ui.separator();
             let (dot, text) = if running {
-                (Color32::from_rgb(40, 170, 70), if agent.is_empty() { format!("PeerCast :{}", cfg.peercast.port) } else { agent })
+                (Color32::from_rgb(40, 170, 70), if agent.is_empty() { format!("PeerCast {}", cfg.peercast.address) } else { agent })
             } else {
-                (Color32::from_rgb(200, 60, 60), format!("PeerCast 未起動 (:{})", cfg.peercast.port))
+                (Color32::from_rgb(200, 60, 60), format!("PeerCast 未起動 ({})", cfg.peercast.address))
             };
             ui.colored_label(dot, "●");
             ui.label(text);
@@ -1078,7 +1078,7 @@ impl App {
 
     fn log_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_log;
-        egui::Window::new("ログ").open(&mut open).default_size([600.0, 300.0]).show(ctx, |ui| {
+        sub_window(ctx, "log", "ログ", [640.0, 360.0], &mut open, |ui| {
             let mut s = lock(&self.shared);
             if ui.button("クリア").clicked() {
                 s.log.clear();
@@ -1104,7 +1104,7 @@ impl App {
         let mut open = true;
         let mut actions = Vec::new();
         let mut reload = false;
-        egui::Window::new("接続中のチャンネル (PeerCast)").open(&mut open).default_size([560.0, 240.0]).show(ctx, |ui| {
+        sub_window(ctx, "relay", "接続中のチャンネル (PeerCast)", [600.0, 300.0], &mut open, |ui| {
             let r = self.relay.lock().unwrap_or_else(|e| e.into_inner());
             ui.horizontal(|ui| {
                 if ui.button("⟳ 再読み込み").clicked() {
@@ -1156,7 +1156,7 @@ impl App {
         let mut open = true;
         let mut result: Option<bool> = None; // Some(true) で閉じる、Some(false) で適用だけ
         let mut cancel = false;
-        egui::Window::new("設定").open(&mut open).default_size([640.0, 440.0]).resizable(true).show(ctx, |ui| {
+        sub_window(ctx, "settings", "設定", [720.0, 560.0], &mut open, |ui| {
             ui.horizontal(|ui| {
                 for (t, label) in [
                     (SettingsTab::Yp, "YP"),
@@ -1170,8 +1170,8 @@ impl App {
                 }
             });
             ui.separator();
-            let avail = 400.0_f32;
-            egui::ScrollArea::vertical().max_height(avail.max(100.0)).auto_shrink([false, true]).show(ui, |ui| match dlg.tab {
+            let avail = ui.available_height() - 48.0;
+            egui::ScrollArea::vertical().max_height(avail.max(100.0)).auto_shrink(false).show(ui, |ui| match dlg.tab {
                 SettingsTab::Yp => settings_yp(ui, &mut dlg.cfg),
                 SettingsTab::Update => settings_update(ui, &mut dlg.cfg),
                 SettingsTab::PeerCast => settings_peercast(ui, &mut dlg.cfg, &dlg.test),
@@ -1222,7 +1222,7 @@ impl App {
         let mut open = true;
         let mut apply = None;
         let mut cancel = false;
-        egui::Window::new("フィルター (お気に入り・無視・色分け)").open(&mut open).default_size([680.0, 420.0]).show(ctx, |ui| {
+        sub_window(ctx, "filters", "フィルター (お気に入り・無視・色分け)", [760.0, 520.0], &mut open, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("追加").clicked() {
                     dlg.filters.push(Filter::default());
@@ -1243,7 +1243,7 @@ impl App {
                 }
             });
             ui.separator();
-            let height = 340.0;
+            let height = ui.available_height() - 44.0;
             ui.horizontal_top(|ui| {
                 ui.set_max_height(height);
                 egui::ScrollArea::vertical().id_salt("flist").max_height(height).max_width(200.0).auto_shrink([false, false]).show(ui, |ui| {
@@ -1337,6 +1337,21 @@ impl App {
     }
 }
 
+/// メインとは別の OS のウィンドウを開く (自由に移動・サイズ変更できる)。閉じるボタンで `open` を false にする。
+fn sub_window(ctx: &egui::Context, id: &str, title: &str, size: [f32; 2], open: &mut bool, mut add: impl FnMut(&mut egui::Ui)) {
+    let builder = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_inner_size(size)
+        .with_min_inner_size([320.0, 200.0])
+        .with_icon(win::app_icon());
+    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(id), builder, |ui, _class| {
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            *open = false;
+        }
+        egui::CentralPanel::default().show(ui, |ui| add(ui));
+    });
+}
+
 fn right(ui: &mut egui::Ui, text: String) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.label(text);
@@ -1375,12 +1390,8 @@ fn validate(cfg: &mut Config) -> Result<(), String> {
             return Err(format!("同じ URL の YP が 2 つあります: {}", y.url));
         }
     }
-    if cfg.peercast.host.trim().is_empty() {
-        return Err("PeerCast のホストが空です".into());
-    }
-    if cfg.peercast.port == 0 {
-        return Err("PeerCast のポートが不正です".into());
-    }
+    config::parse_address(&cfg.peercast.address)?;
+    cfg.peercast.address = cfg.peercast.address.trim().to_string();
     cfg.update_interval_min = cfg.update_interval_min.max(config::MIN_AUTO_INTERVAL_MIN);
     Ok(())
 }
@@ -1484,11 +1495,16 @@ fn settings_peercast(ui: &mut egui::Ui, cfg: &mut Config, test: &Arc<Mutex<Strin
                 ui.selectable_value(&mut pc.kind, PeerCastKind::PeerCastStation, "PeerCastStation");
             });
         ui.end_row();
-        ui.label("ホスト");
-        ui.add_sized([200.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut pc.host));
-        ui.end_row();
-        ui.label("ポート");
-        ui.add(egui::DragValue::new(&mut pc.port).range(1..=65535));
+        ui.label("アドレス");
+        ui.horizontal(|ui| {
+            let ok = config::parse_address(&pc.address).is_ok();
+            let mut te = egui::TextEdit::singleline(&mut pc.address).hint_text("127.0.0.1:7144");
+            if !ok {
+                te = te.text_color(Color32::from_rgb(220, 60, 60));
+            }
+            ui.add_sized([220.0, ui.spacing().interact_size.y], te);
+            ui.label(RichText::new("ホスト:ポート").weak());
+        });
         ui.end_row();
         ui.label("再生の URL");
         ui.vertical(|ui| {
@@ -1515,7 +1531,7 @@ fn settings_peercast(ui: &mut egui::Ui, cfg: &mut Config, test: &Arc<Mutex<Strin
         ui.end_row();
     });
     ui.label(
-        RichText::new("ユーザー名とパスワードは JSON-RPC (接続中のチャンネル、停止、再接続) にだけ使います。再生は localhost からなので認証は要りません。")
+        RichText::new("ユーザー名とパスワードは、PeerCast が別の PC にあるときの「接続中のチャンネル」「停止」「再接続」にだけ使います (PeerCast の管理画面のパスワード)。一覧の取得と再生には要りません。")
             .weak(),
     );
     ui.horizontal(|ui| {
@@ -1525,7 +1541,7 @@ fn settings_peercast(ui: &mut egui::Ui, cfg: &mut Config, test: &Arc<Mutex<Strin
             *test.lock().unwrap_or_else(|e| e.into_inner()) = "確認中…".into();
             std::thread::spawn(move || {
                 let msg = if !peercast::is_running(&pc) {
-                    format!("{}:{} につながりません。PeerCast が起動しているか確かめてください", pc.host, pc.port)
+                    format!("{} につながりません。PeerCast が起動しているか確かめてください", pc.base_url())
                 } else {
                     match Rpc::new(&pc).version_info() {
                         Ok(v) => format!("OK: {} ({:?})", v.agent, v.kind),
@@ -1691,7 +1707,7 @@ fn search_editor(ui: &mut egui::Ui, id: &str, s: &mut Search, toggle: Option<&st
 }
 
 fn filter_editor(ui: &mut egui::Ui, f: &mut Filter) {
-    egui::ScrollArea::vertical().id_salt("fedit").max_height(340.0).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("fedit").auto_shrink(false).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label("名前");
             ui.add_sized([200.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut f.name).hint_text("空なら条件を表示"));

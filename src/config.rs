@@ -63,8 +63,8 @@ pub enum PlayUrlKind {
 #[serde(default)]
 pub struct PeerCastConfig {
     pub kind: PeerCastKind,
-    pub host: String,
-    pub port: u16,
+    /// `ホスト:ポート` (例 `127.0.0.1:7144`、`[::1]:7144`)。ポートを省くと 7144。
+    pub address: String,
     /// JSON-RPC 用。空なら認証しない。
     pub user: String,
     pub password: String,
@@ -78,14 +78,66 @@ impl Default for PeerCastConfig {
     fn default() -> Self {
         PeerCastConfig {
             kind: PeerCastKind::Auto,
-            host: "127.0.0.1".into(),
-            port: 7144,
+            address: format!("127.0.0.1:{}", DEFAULT_PEERCAST_PORT),
             user: String::new(),
             password: String::new(),
             exe_path: String::new(),
             launch_on_start: false,
             url_kind: PlayUrlKind::Stream,
         }
+    }
+}
+
+pub const DEFAULT_PEERCAST_PORT: u16 = 7144;
+
+/// `ホスト:ポート` を分ける。`http://` や末尾の `/` は取り除く。IPv6 は `[addr]:port`。
+pub fn parse_address(s: &str) -> Result<(String, u16), String> {
+    let t = s.trim();
+    let t = t.strip_prefix("http://").unwrap_or(t);
+    let t = t.trim_end_matches('/');
+    if t.is_empty() {
+        return Err("PeerCast のアドレスが空です".into());
+    }
+    let bad = || format!("PeerCast のアドレスが正しくありません: {} (例 127.0.0.1:7144)", s.trim());
+    let (host, port) = if let Some(rest) = t.strip_prefix('[') {
+        let (h, after) = rest.split_once(']').ok_or_else(bad)?;
+        match after {
+            "" => (h, None),
+            p => (h, Some(p.strip_prefix(':').ok_or_else(bad)?)),
+        }
+    } else if t.matches(':').count() > 1 {
+        // 角かっこのない IPv6 はポートなしとみなす
+        (t, None)
+    } else {
+        match t.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (t, None),
+        }
+    };
+    if host.is_empty() || host.contains(['/', ' ', '?', '#', '@']) {
+        return Err(bad());
+    }
+    let port = match port {
+        Some(p) => p.parse::<u16>().ok().filter(|&n| n != 0).ok_or_else(bad)?,
+        None => DEFAULT_PEERCAST_PORT,
+    };
+    Ok((host.to_string(), port))
+}
+
+impl PeerCastConfig {
+    pub fn host(&self) -> String {
+        parse_address(&self.address).map(|a| a.0).unwrap_or_else(|_| "127.0.0.1".into())
+    }
+
+    pub fn port(&self) -> u16 {
+        parse_address(&self.address).map(|a| a.1).unwrap_or(DEFAULT_PEERCAST_PORT)
+    }
+
+    /// `http://ホスト:ポート` (IPv6 は角かっこで囲む)
+    pub fn base_url(&self) -> String {
+        let h = self.host();
+        let h = if h.contains(':') { format!("[{}]", h) } else { h };
+        format!("http://{}:{}", h, self.port())
     }
 }
 
@@ -288,10 +340,11 @@ mod tests {
 
     #[test]
     fn partial_json_uses_defaults() {
-        let c: Config = serde_json::from_str(r#"{"auto_update": false, "peercast": {"port": 7145}}"#).unwrap();
+        let c: Config = serde_json::from_str(r#"{"auto_update": false, "peercast": {"address": "192.0.2.1:7145"}}"#).unwrap();
         assert!(!c.auto_update);
-        assert_eq!(c.peercast.port, 7145);
-        assert_eq!(c.peercast.host, "127.0.0.1");
+        assert_eq!(c.peercast.port(), 7145);
+        assert_eq!(c.peercast.host(), "192.0.2.1");
+        assert_eq!(c.peercast.url_kind, PlayUrlKind::Stream);
         assert_eq!(c.yps.len(), 5);
     }
 
@@ -306,6 +359,23 @@ mod tests {
         let p = PlayerEntry { types: "FLV, mkv".into(), ..Default::default() };
         assert!(p.matches("flv") && p.matches("MKV") && !p.matches("WMV"));
         assert!(PlayerEntry::default().matches("anything"));
+    }
+
+    #[test]
+    fn parses_address() {
+        assert_eq!(parse_address("192.0.2.1:60016"), Ok(("192.0.2.1".into(), 60016)));
+        assert_eq!(parse_address(" localhost "), Ok(("localhost".into(), 7144)));
+        assert_eq!(parse_address("http://pc.local:7145/"), Ok(("pc.local".into(), 7145)));
+        assert_eq!(parse_address("[::1]:7145"), Ok(("::1".into(), 7145)));
+        assert_eq!(parse_address("[::1]"), Ok(("::1".into(), 7144)));
+        assert_eq!(parse_address("fe80::1"), Ok(("fe80::1".into(), 7144)));
+        assert!(parse_address("").is_err());
+        assert!(parse_address("host:0").is_err());
+        assert!(parse_address("host:70000").is_err());
+        assert!(parse_address("host:abc").is_err());
+        assert!(parse_address("a/b:1").is_err());
+        let pc = PeerCastConfig { address: "[::1]:7145".into(), ..Default::default() };
+        assert_eq!(pc.base_url(), "http://[::1]:7145");
     }
 
     #[test]

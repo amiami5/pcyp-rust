@@ -174,7 +174,7 @@ impl Worker {
             s.yps.iter().map(|y| (y.name.clone(), y.url.clone())).collect()
         };
         (self.repaint)();
-        let port = cfg.peercast.port;
+        let port = cfg.peercast.port();
         std::thread::scope(|scope| {
             for (name, url) in &targets {
                 let fetcher = self.fetcher.clone();

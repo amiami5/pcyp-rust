@@ -94,6 +94,12 @@ pub fn now_hms() -> String {
     format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
+/// ウィンドウのアイコン (一度だけ作る)。
+pub fn app_icon() -> Arc<eframe::egui::IconData> {
+    static ICON: OnceLock<Arc<eframe::egui::IconData>> = OnceLock::new();
+    ICON.get_or_init(|| Arc::new(eframe::egui::IconData { rgba: icon_rgba(64), width: 64, height: 64 })).clone()
+}
+
 /// アプリのアイコン (青い丸に白い三角) の RGBA。
 pub fn icon_rgba(size: u32) -> Vec<u8> {
     let mut v = vec![0u8; (size * size * 4) as usize];
