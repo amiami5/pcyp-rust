@@ -8,7 +8,9 @@ pub const CONFIG_FILE: &str = "pcyp-rust.json";
 pub const FILTER_FILE: &str = "channelFilters.json";
 
 /// 自動更新の間隔の最小 (分)。YP サーバーに負担をかけないため。
-pub const MIN_AUTO_INTERVAL_MIN: u32 = 5;
+pub const MIN_AUTO_INTERVAL_MIN: u32 = 2;
+/// 自動更新の間隔の初期値 (分)。
+pub const DEFAULT_AUTO_INTERVAL_MIN: u32 = 5;
 /// 手動更新は前回から何秒空けるか。
 pub const MANUAL_INTERVAL_SEC: u64 = 30;
 
@@ -35,7 +37,7 @@ impl YpEntry {
 pub fn default_yps() -> Vec<YpEntry> {
     vec![
         YpEntry::new("SP", "http://bayonet.ddo.jp/sp/index.txt"),
-        YpEntry::new("Heisei", "http://yp.pcgw.pgw.jp/index.txt"),
+        YpEntry::new("平成", "http://yp.pcgw.pgw.jp/index.txt"),
         YpEntry::new("P@", "https://p-at.net/index.txt"),
         YpEntry::new("YPv6", "http://ypv6.pecastation.org/index.txt"),
         YpEntry::new("Event YP", "http://eventyp.xrea.jp/index.txt"),
@@ -245,6 +247,8 @@ pub struct ViewConfig {
     pub columns: Columns,
     /// お知らせ (ID が 0) の行を出す
     pub show_info_rows: bool,
+    /// 無視のタブを出さない
+    pub hide_ignored_tab: bool,
     pub window_size: Option<[f32; 2]>,
 }
 
@@ -258,6 +262,7 @@ impl Default for ViewConfig {
             font_path: String::new(),
             columns: Columns::default(),
             show_info_rows: true,
+            hide_ignored_tab: true,
             window_size: None,
         }
     }
@@ -286,7 +291,7 @@ impl Default for Config {
             peercast: PeerCastConfig::default(),
             players: default_players(),
             auto_update: true,
-            update_interval_min: MIN_AUTO_INTERVAL_MIN,
+            update_interval_min: DEFAULT_AUTO_INTERVAL_MIN,
             fetch_on_start: true,
             browser: String::new(),
             notify: NotifyConfig::default(),
@@ -351,7 +356,8 @@ mod tests {
     #[test]
     fn interval_has_minimum() {
         let c = Config { update_interval_min: 1, ..Default::default() };
-        assert_eq!(c.update_interval_sec(), 300);
+        assert_eq!(c.update_interval_sec(), 120);
+        assert_eq!(Config::default().update_interval_sec(), 300);
     }
 
     #[test]

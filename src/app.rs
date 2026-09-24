@@ -722,11 +722,15 @@ impl App {
                         tab = Tab::Yp(url.clone());
                     }
                 }
-                ui.selectable_value(&mut tab, Tab::Ignored, format!("🚫 無視 ({})", c.ignored));
+                if !cfg.view.hide_ignored_tab {
+                    ui.selectable_value(&mut tab, Tab::Ignored, format!("🚫 無視 ({})", c.ignored));
+                }
                 self.tab = tab;
             });
         });
-        let _ = cfg;
+        if cfg.view.hide_ignored_tab && self.tab == Tab::Ignored {
+            self.tab = Tab::All;
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui, cfg: &Config) {
@@ -1703,6 +1707,7 @@ fn settings_view(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.checkbox(&mut cfg.view.two_line, "2 行で表示 (pcyplite 風)");
     ui.checkbox(&mut cfg.view.dark, "ダークモード");
     ui.checkbox(&mut cfg.view.show_info_rows, "YP のお知らせの行を表示する");
+    ui.checkbox(&mut cfg.view.hide_ignored_tab, "無視のタブを隠す");
     ui.separator();
     ui.label(RichText::new(format!("設定の保存先: {}", config::base_dir().display())).weak());
 }
