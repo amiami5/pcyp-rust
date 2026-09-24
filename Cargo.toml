@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT"
 description = "Windows 用の PeerCast YP ブラウザ"
 repository = "https://github.com/amiami5/pcyp-rust"
+build = "src/build.rs"
 
 [dependencies]
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow"] }
@@ -25,3 +26,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[build-dependencies]
+embed-resource = "3"

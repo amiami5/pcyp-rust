@@ -5,6 +5,7 @@ mod chandir;
 mod config;
 mod fetch;
 mod filter;
+mod icon;
 mod peercast;
 mod player;
 mod win;
