@@ -5,6 +5,9 @@
 #
 # そのタグのリリースがあれば zip を置き換え、なければ下書きのリリースを作る。
 # 公開は、中身を確かめてから手で行う。
+#
+# 下書きを公開するとタグが付いて、もう一度このワークフローが動く。そのときは、リリースに
+# もう zip があればビルドしないで終わる (公開した zip を置き換えない)。手で動かしたときは毎回作り直す。
 
 name: release
 
@@ -25,31 +28,48 @@ jobs:
     runs-on: windows-latest
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      ZIP: pcyp-rust-${{ github.event.inputs.tag || github.ref_name }}-windows-x64.zip
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
+      - name: もう zip があるか確かめる (タグの push のときだけ)
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $names = gh release view $env:TAG --json assets --jq '.assets[].name' 2>$null
+          if ($LASTEXITCODE -eq 0 -and ($names -contains $env:ZIP)) {
+            "リリース $env:TAG にはもう $env:ZIP があるので、ビルドしません"
+            "SKIP=true" >> $env:GITHUB_ENV
+          }
+          exit 0
+
       - uses: actions/checkout@v5
+        if: env.SKIP != 'true'
 
       - name: Rust の準備
+        if: env.SKIP != 'true'
         run: rustup toolchain install stable --profile minimal && rustup default stable
 
       - name: テスト
+        if: env.SKIP != 'true'
         run: cargo test --locked
 
       - name: ビルド
+        if: env.SKIP != 'true'
         run: cargo build --release --locked
 
       - name: zip にまとめる
+        if: env.SKIP != 'true'
         shell: pwsh
         run: |
-          $name = "pcyp-rust-$env:TAG-windows-x64"
+          $name = [IO.Path]::GetFileNameWithoutExtension($env:ZIP)
           New-Item -ItemType Directory -Force $name | Out-Null
           Copy-Item target/release/pcyp-rust.exe, LICENSE, README.md $name
-          Compress-Archive -Path $name -DestinationPath "$name.zip" -Force
-          "ZIP=$name.zip" >> $env:GITHUB_ENV
+          Compress-Archive -Path $name -DestinationPath $env:ZIP -Force
 
       - name: リリースに添付する
+        if: env.SKIP != 'true'
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
