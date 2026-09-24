@@ -242,6 +242,8 @@ pub struct App {
     view_key: String,
     scroll_to: Option<usize>,
     hovered_url: String,
+    /// 一覧の 1 行の高さ (行の間の隙間を含む)。ホイールで進める量に使う
+    row_height: f32,
 
     settings: Option<SettingsDlg>,
     filter_dlg: Option<FilterDlg>,
@@ -310,6 +312,7 @@ impl App {
             view_key: String::new(),
             scroll_to: None,
             hovered_url: String::new(),
+            row_height: 0.0,
             settings: None,
             filter_dlg: None,
             show_log: false,
@@ -958,6 +961,7 @@ impl App {
         let cols = columns(&cfg.view);
         let line = ui.text_style_height(&egui::TextStyle::Body);
         let row_h = if cfg.view.two_line { line * 2.0 + 8.0 } else { line + 6.0 };
+        self.row_height = row_h + ui.spacing().item_spacing.y;
         let selected = self.selected_index();
         let mut actions = Vec::new();
         let mut sort_click = None;
@@ -1063,8 +1067,7 @@ impl App {
                 } else if resp.clicked() || resp.secondary_clicked() {
                     actions.push(Action::Select(i));
                 }
-                let summary = c.summary();
-                let resp = if summary.is_empty() { resp } else { resp.on_hover_text_at_pointer(summary) };
+                // 省略された文字は、egui が全文の吹き出しを出すので、行には吹き出しを付けない
                 resp.context_menu(|ui| this.channel_menu(ui, i, &mut actions));
             });
         });
@@ -1694,6 +1697,13 @@ fn settings_view(ui: &mut egui::Ui, cfg: &mut Config) {
         ui.label("文字の大きさ");
         ui.add(egui::Slider::new(&mut cfg.view.font_size, 10.0..=24.0).step_by(1.0));
         ui.end_row();
+        ui.label("ホイールのスクロール");
+        ui.horizontal(|ui| {
+            ui.label("1 目盛りで");
+            ui.add(egui::DragValue::new(&mut cfg.view.scroll_rows).range(1..=20));
+            ui.label("行");
+        });
+        ui.end_row();
         ui.label("フォント (再起動で反映)");
         ui.horizontal(|ui| {
             ui.add_sized([300.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut cfg.view.font_path).hint_text("空なら Yu Gothic か Meiryo"));
@@ -1792,6 +1802,23 @@ fn filter_editor(ui: &mut egui::Ui, f: &mut Filter) {
 
 impl eframe::App for App {
     /// 最小化中や非表示中も呼ばれる
+    /// マウスのホイール (行単位) を、一覧の「行の高さ × 設定の行数」の量に変える。
+    /// タッチパッドなどの細かいスクロール (ポイント単位) はそのまま。
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.row_height <= 0.0 {
+            return;
+        }
+        let rows = read(&self.config).view.scroll_rows.clamp(1, 20) as f32;
+        for e in &mut raw_input.events {
+            if let egui::Event::MouseWheel { unit, delta, .. } = e
+                && *unit == egui::MouseWheelUnit::Line
+            {
+                *unit = egui::MouseWheelUnit::Point;
+                *delta *= self.row_height * rows;
+            }
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let cfg = self.cfg();
         self.window_state(ctx, &cfg);

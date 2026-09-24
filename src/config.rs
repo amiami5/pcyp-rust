@@ -246,6 +246,8 @@ pub struct ViewConfig {
     pub show_info_rows: bool,
     /// 無視のタブを出さない
     pub hide_ignored_tab: bool,
+    /// マウスのホイール 1 目盛りで一覧を何行進めるか
+    pub scroll_rows: u32,
     pub window_size: Option<[f32; 2]>,
 }
 
@@ -260,6 +262,7 @@ impl Default for ViewConfig {
             columns: Columns::default(),
             show_info_rows: true,
             hide_ignored_tab: true,
+            scroll_rows: 2,
             window_size: None,
         }
     }
