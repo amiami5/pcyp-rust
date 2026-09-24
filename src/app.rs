@@ -1183,7 +1183,7 @@ impl App {
         let mut open = true;
         let mut result: Option<bool> = None; // Some(true) で閉じる、Some(false) で適用だけ
         let mut cancel = false;
-        sub_window(ctx, "settings", "設定", [720.0, 560.0], &mut open, |ui| {
+        sub_window(ctx, "settings", "設定", [780.0, 760.0], &mut open, |ui| {
             ui.horizontal(|ui| {
                 for (t, label) in [
                     (SettingsTab::Yp, "YP"),
