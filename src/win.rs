@@ -1,0 +1,229 @@
+//! Windows 固有の処理: ウィンドウの表示と非表示、タスクトレイ、通知、時刻、アイコン。
+
+use crate::chandir::Channel;
+use crate::config::Config;
+use crate::worker::{Command, SharedRef, lock};
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, OnceLock, RwLock};
+
+static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+static EGUI_CTX: OnceLock<eframe::egui::Context> = OnceLock::new();
+
+pub fn set_main_window(hwnd: isize, ctx: eframe::egui::Context) {
+    MAIN_HWND.store(hwnd, Ordering::SeqCst);
+    let _ = EGUI_CTX.set(ctx);
+}
+
+pub fn request_repaint() {
+    if let Some(c) = EGUI_CTX.get() {
+        c.request_repaint();
+    }
+}
+
+#[cfg(windows)]
+mod imp {
+    use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    fn hwnd() -> Option<windows_sys::Win32::Foundation::HWND> {
+        let h = MAIN_HWND.load(Ordering::SeqCst);
+        (h != 0).then_some(h as _)
+    }
+
+    pub fn show_window() {
+        if let Some(h) = hwnd() {
+            unsafe {
+                if IsIconic(h) != 0 {
+                    ShowWindow(h, SW_RESTORE);
+                } else {
+                    ShowWindow(h, SW_SHOW);
+                }
+                SetForegroundWindow(h);
+            }
+        }
+        request_repaint();
+    }
+
+    pub fn hide_window() {
+        if let Some(h) = hwnd() {
+            unsafe { ShowWindow(h, SW_HIDE) };
+        }
+    }
+
+    pub fn is_window_visible() -> bool {
+        hwnd().is_some_and(|h| unsafe { IsWindowVisible(h) != 0 && IsIconic(h) == 0 })
+    }
+
+    /// 閉じる要求を送る (トレイの「終了」から)。
+    pub fn post_close() {
+        if let Some(h) = hwnd() {
+            unsafe { PostMessageW(h, WM_CLOSE, 0, 0) };
+        }
+    }
+
+    pub fn local_time() -> (u16, u16, u16) {
+        let mut st = unsafe { std::mem::zeroed() };
+        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
+        let st: windows_sys::Win32::Foundation::SYSTEMTIME = st;
+        (st.wHour, st.wMinute, st.wSecond)
+    }
+}
+
+#[cfg(not(windows))]
+mod imp {
+    pub fn show_window() {
+        super::request_repaint();
+    }
+    pub fn hide_window() {}
+    pub fn is_window_visible() -> bool {
+        true
+    }
+    pub fn post_close() {}
+    pub fn local_time() -> (u16, u16, u16) {
+        let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        (((s / 3600) % 24) as u16, ((s / 60) % 60) as u16, (s % 60) as u16)
+    }
+}
+
+pub use imp::{hide_window, is_window_visible, post_close, show_window};
+
+/// 今の時刻 (`hh:mm:ss`)。
+pub fn now_hms() -> String {
+    let (h, m, s) = imp::local_time();
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+/// アプリのアイコン (青い丸に白い三角) の RGBA。
+pub fn icon_rgba(size: u32) -> Vec<u8> {
+    let mut v = vec![0u8; (size * size * 4) as usize];
+    let c = size as f32 / 2.0;
+    let r = c - 0.5;
+    for y in 0..size {
+        for x in 0..size {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let d = ((fx - c).powi(2) + (fy - c).powi(2)).sqrt();
+            let a = (r - d + 0.5).clamp(0.0, 1.0);
+            if a <= 0.0 {
+                continue;
+            }
+            // 再生の三角
+            let (tx, ty) = ((fx - c) / r, (fy - c) / r);
+            let inside = tx > -0.35 && tx < 0.55 && ty.abs() < (0.55 - tx) * 0.62;
+            let (cr, cg, cb) = if inside { (255, 255, 255) } else { (30, 110, 220) };
+            let i = ((y * size + x) * 4) as usize;
+            v[i..i + 4].copy_from_slice(&[cr, cg, cb, (a * 255.0) as u8]);
+        }
+    }
+    v
+}
+
+/// お気に入りのチャンネルが始まったことを通知する。「再生」のボタンを押すと再生する。
+pub fn notify_channels(chans: &[Channel], config: Arc<RwLock<Config>>, shared: SharedRef) {
+    // 一度にたくさん出さない
+    const MAX_TOASTS: usize = 3;
+    for c in chans.iter().take(MAX_TOASTS) {
+        let body = c.summary();
+        let ch = c.clone();
+        let (config, shared) = (config.clone(), shared.clone());
+        show_toast(&format!("配信開始: {}", c.name), &body, Some(Box::new(move |action: Option<String>| {
+            if action.as_deref() == Some("play") {
+                let cfg = config.read().unwrap_or_else(|e| e.into_inner()).clone();
+                let r = crate::player::play(&cfg, &ch);
+                let mut s = lock(&shared);
+                match r {
+                    Ok(cmd) => s.log(false, format!("再生: {}", cmd)),
+                    Err(e) => s.log(true, e),
+                }
+                drop(s);
+                request_repaint();
+            } else {
+                show_window();
+            }
+        })));
+    }
+    if chans.len() > MAX_TOASTS {
+        let rest: Vec<&str> = chans[MAX_TOASTS..].iter().map(|c| c.name.as_str()).collect();
+        show_toast(&format!("ほかに {} 件の配信が始まりました", rest.len()), &rest.join("、"), None);
+    }
+}
+
+type OnActivated = Box<dyn Fn(Option<String>) + Send + 'static>;
+
+#[cfg(windows)]
+fn show_toast(title: &str, body: &str, on_play: Option<OnActivated>) {
+    use tauri_winrt_notification::{Duration, Toast};
+    let mut t = Toast::new(Toast::POWERSHELL_APP_ID).title(title).text1(body).duration(Duration::Short);
+    match on_play {
+        Some(f) => {
+            t = t.add_button("再生", "play").on_activated(move |a| {
+                f(a);
+                Ok(())
+            });
+        }
+        None => {
+            t = t.on_activated(|_| {
+                show_window();
+                Ok(())
+            });
+        }
+    }
+    let _ = t.show();
+}
+
+#[cfg(not(windows))]
+fn show_toast(_title: &str, _body: &str, _on_play: Option<OnActivated>) {}
+
+/// タスクトレイのアイコン。トレイのメニューとクリックを処理する。
+pub struct Tray {
+    _icon: tray_icon::TrayIcon,
+}
+
+pub fn create_tray(tx: Sender<Command>, open_settings: Arc<std::sync::atomic::AtomicBool>) -> Result<Tray, String> {
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show = MenuItem::new("表示", true, None);
+    let refresh = MenuItem::new("更新", true, None);
+    let settings = MenuItem::new("設定...", true, None);
+    let quit = MenuItem::new("終了", true, None);
+    let menu = Menu::new();
+    menu.append_items(&[&show, &refresh, &settings, &PredefinedMenuItem::separator(), &quit]).map_err(|e| e.to_string())?;
+
+    let icon = tray_icon::Icon::from_rgba(icon_rgba(32), 32, 32).map_err(|e| e.to_string())?;
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
+        .with_tooltip(crate::config::APP_NAME)
+        .with_icon(icon)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let (show_id, refresh_id, settings_id, quit_id) = (show.id().clone(), refresh.id().clone(), settings.id().clone(), quit.id().clone());
+    let tx = std::sync::Mutex::new(tx);
+    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+        if e.id == show_id {
+            show_window();
+        } else if e.id == refresh_id {
+            let _ = tx.lock().map(|t| t.send(Command::Refresh { manual: true }));
+            request_repaint();
+        } else if e.id == settings_id {
+            open_settings.store(true, Ordering::SeqCst);
+            show_window();
+        } else if e.id == quit_id {
+            crate::app::QUITTING.store(true, Ordering::SeqCst);
+            show_window();
+            post_close();
+        }
+    }));
+    TrayIconEvent::set_event_handler(Some(|e: TrayIconEvent| {
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+            if is_window_visible() {
+                hide_window();
+            } else {
+                show_window();
+            }
+        }
+    }));
+    Ok(Tray { _icon: tray })
+}
