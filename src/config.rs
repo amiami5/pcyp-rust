@@ -248,6 +248,8 @@ pub struct ViewConfig {
     pub hide_ignored_tab: bool,
     /// マウスのホイール 1 目盛りで一覧を何行進めるか
     pub scroll_rows: u32,
+    /// 一覧で省略された文字に、カーソルを合わせたとき全文を出す
+    pub show_tooltips: bool,
     pub window_size: Option<[f32; 2]>,
 }
 
@@ -263,6 +265,7 @@ impl Default for ViewConfig {
             show_info_rows: true,
             hide_ignored_tab: true,
             scroll_rows: 2,
+            show_tooltips: false,
             window_size: None,
         }
     }
@@ -351,6 +354,16 @@ mod tests {
         assert_eq!(c.peercast.host(), "192.0.2.1");
         assert_eq!(c.peercast.url_kind, PlayUrlKind::Stream);
         assert_eq!(c.yps.len(), 5);
+    }
+
+    #[test]
+    fn defaults() {
+        let c = Config::default();
+        let names: Vec<_> = c.yps.iter().map(|y| y.name.as_str()).collect();
+        assert_eq!(names, ["SP", "平成", "P@", "YPv6", "Event YP"]);
+        assert!(!c.view.show_tooltips);
+        assert!(c.view.hide_ignored_tab);
+        assert_eq!(c.view.scroll_rows, 2);
     }
 
     #[test]

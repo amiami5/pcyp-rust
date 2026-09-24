@@ -816,7 +816,7 @@ impl App {
                 if r.is_new {
                     ui.label(RichText::new("NEW").small().color(Color32::from_rgb(230, 120, 0)));
                 }
-                ui.add(egui::Label::new(self.name_text(ui, r)).truncate());
+                ui.add(egui::Label::new(self.name_text(ui, r)).truncate().show_tooltip_when_elided(cfg.view.show_tooltips));
             });
         });
     }
@@ -1014,12 +1014,12 @@ impl App {
                             Col::TwoName => {
                                 ui.vertical(|ui| {
                                     this.name_line(ui, r, cfg);
-                                    ui.add(egui::Label::new(c.summary()).truncate());
+                                    ui.add(egui::Label::new(c.summary()).truncate().show_tooltip_when_elided(cfg.view.show_tooltips));
                                 });
                             }
                             Col::Name => this.name_line(ui, r, cfg),
                             Col::Summary => {
-                                ui.add(egui::Label::new(c.summary()).truncate());
+                                ui.add(egui::Label::new(c.summary()).truncate().show_tooltip_when_elided(cfg.view.show_tooltips));
                             }
                             Col::Listeners => {
                                 right(ui, format!("{}/{}", listeners_text(c.listeners), listeners_text(c.relays)));
@@ -1030,10 +1030,10 @@ impl App {
                                 ui.label(&c.content_type);
                             }
                             Col::Yp => {
-                                ui.add(egui::Label::new(RichText::new(&r.yp).weak()).truncate());
+                                ui.add(egui::Label::new(RichText::new(&r.yp).weak()).truncate().show_tooltip_when_elided(cfg.view.show_tooltips));
                             }
                             Col::Track => {
-                                ui.add(egui::Label::new(c.track_text()).truncate());
+                                ui.add(egui::Label::new(c.track_text()).truncate().show_tooltip_when_elided(cfg.view.show_tooltips));
                             }
                             Col::TwoStats => {
                                 ui.with_layout(Layout::top_down(Align::Max), |ui| {
@@ -1727,6 +1727,7 @@ fn settings_view(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.checkbox(&mut cfg.view.dark, "ダークモード");
     ui.checkbox(&mut cfg.view.show_info_rows, "YP のお知らせの行を表示する");
     ui.checkbox(&mut cfg.view.hide_ignored_tab, "無視のタブを隠す");
+    ui.checkbox(&mut cfg.view.show_tooltips, "一覧で省略された文字に、カーソルを合わせると全文を出す (ツールチップ)");
     ui.separator();
     ui.label(RichText::new(format!("設定の保存先: {}", config::base_dir().display())).weak());
 }
