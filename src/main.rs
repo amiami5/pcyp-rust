@@ -85,14 +85,15 @@ fn main() -> eframe::Result {
     }
 
     let shared = Arc::new(Mutex::new(worker::Shared::default()));
-    let cfg: Config = config::load_json(config::CONFIG_FILE).unwrap_or_else(|e| {
-        worker::lock(&shared).log(true, format!("{} (初期値を使います)", e));
-        Config::default()
-    });
-    let filters: Filters = config::load_json(config::FILTER_FILE).unwrap_or_else(|e| {
-        worker::lock(&shared).log(true, e);
-        Filters::default()
-    });
+    // 読めなかったファイルは消さずに退避し、控えから読む。何があったかは画面の上で知らせる
+    let loaded_cfg: config::Loaded<Config> = config::load_json(config::CONFIG_FILE);
+    let loaded_filters: config::Loaded<Filters> = config::load_json(config::FILTER_FILE);
+    let notices: Vec<String> = loaded_cfg.notices.into_iter().chain(loaded_filters.notices).collect();
+    for n in &notices {
+        worker::lock(&shared).log(true, n.clone());
+    }
+    let cfg: Config = loaded_cfg.value;
+    let filters: Filters = loaded_filters.value;
     let config = Arc::new(RwLock::new(cfg.clone()));
     let filters = Arc::new(RwLock::new(filters.0));
     let (tx, rx) = mpsc::channel();
@@ -145,7 +146,7 @@ fn main() -> eframe::Result {
 
             Ok(Box::new(app::App::new(
                 &ctx,
-                app::AppInit { config, filters, shared, tx, tray, open_settings, has_bold },
+                app::AppInit { config, filters, shared, tx, tray, open_settings, has_bold, notices },
             )))
         }),
     )

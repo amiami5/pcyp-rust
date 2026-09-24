@@ -62,11 +62,12 @@ mod imp {
         }
     }
 
-    pub fn local_time() -> (u16, u16, u16) {
+    /// 今の日時 (年、月、日、時、分、秒)
+    pub fn local_time() -> [u16; 6] {
         let mut st = unsafe { std::mem::zeroed() };
         unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
         let st: windows_sys::Win32::Foundation::SYSTEMTIME = st;
-        (st.wHour, st.wMinute, st.wSecond)
+        [st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond]
     }
 }
 
@@ -80,9 +81,10 @@ mod imp {
         true
     }
     pub fn post_close() {}
-    pub fn local_time() -> (u16, u16, u16) {
+    /// 今の日時 (UTC。日付は 1970-01-01 からの日数で代用する)
+    pub fn local_time() -> [u16; 6] {
         let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        (((s / 3600) % 24) as u16, ((s / 60) % 60) as u16, (s % 60) as u16)
+        [1970, 1, (s / 86400) as u16, ((s / 3600) % 24) as u16, ((s / 60) % 60) as u16, (s % 60) as u16]
     }
 }
 
@@ -90,8 +92,14 @@ pub use imp::{hide_window, is_window_visible, post_close, show_window};
 
 /// 今の時刻 (`hh:mm:ss`)。
 pub fn now_hms() -> String {
-    let (h, m, s) = imp::local_time();
+    let [_, _, _, h, m, s] = imp::local_time();
     format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+/// ファイル名に使う今の日時 (`20260925-001637`)。
+pub fn now_stamp() -> String {
+    let [y, mo, d, h, mi, s] = imp::local_time();
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", y, mo, d, h, mi, s)
 }
 
 /// ウィンドウのアイコン (一度だけ作る)。

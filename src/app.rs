@@ -229,6 +229,8 @@ pub struct App {
     tray: Option<win::Tray>,
     open_settings: Arc<AtomicBool>,
     has_bold: bool,
+    /// 画面の上に帯で出す知らせ (閉じるまで出す)
+    notices: Vec<String>,
 
     tab: Tab,
     search: String,
@@ -284,6 +286,8 @@ pub struct AppInit {
     pub tray: Option<win::Tray>,
     pub open_settings: Arc<AtomicBool>,
     pub has_bold: bool,
+    /// 起動時に知らせること (設定のファイルを読めなかった、など)
+    pub notices: Vec<String>,
 }
 
 impl App {
@@ -300,6 +304,7 @@ impl App {
             tray: init.tray,
             open_settings: init.open_settings,
             has_bold: init.has_bold,
+            notices: init.notices,
             tab: Tab::All,
             search: String::new(),
             sort: (SortKey::Listeners, true),
@@ -749,6 +754,38 @@ impl App {
             ui.separator();
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| self.status_items(ui, cfg, last_update, next, errors, last_log));
         });
+    }
+
+    /// 起動時の知らせ (設定のファイルを読めなかった、など) を黄色の帯で出す
+    fn notice_banner(&mut self, ui: &mut egui::Ui) {
+        if self.notices.is_empty() {
+            return;
+        }
+        let (fill, text) = if ui.visuals().dark_mode {
+            (Color32::from_rgb(90, 75, 20), Color32::from_rgb(255, 235, 170))
+        } else {
+            (Color32::from_rgb(255, 243, 190), Color32::from_rgb(90, 60, 0))
+        };
+        let mut close = false;
+        egui::Frame::new().fill(fill).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // 右端の「閉じる」を先に置き、残りの幅で文を折り返す
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                if ui.button("閉じる").clicked() {
+                    close = true;
+                }
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    for n in &self.notices {
+                        ui.add(egui::Label::new(RichText::new(format!("⚠ {}", n)).color(text)).wrap());
+                    }
+                    ui.label(RichText::new(format!("設定のファイルの場所: {}", config::base_dir().display())).color(text).small());
+                });
+            });
+        });
+        ui.add_space(2.0);
+        if close {
+            self.notices.clear();
+        }
     }
 
     fn status_items(
@@ -1852,6 +1889,7 @@ impl eframe::App for App {
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.add_space(2.0);
+            self.notice_banner(ui);
             self.toolbar(ui, &cfg);
             self.tab_bar(ui, &cfg);
         });

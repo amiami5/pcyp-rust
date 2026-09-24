@@ -1,7 +1,7 @@
 //! 設定。exe と同じフォルダに JSON で置く (ポータブル版)。
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const APP_NAME: &str = "pcyp-rust";
 pub const CONFIG_FILE: &str = "pcyp-rust.json";
@@ -318,22 +318,139 @@ pub fn base_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-pub fn load_json<T: for<'de> Deserialize<'de> + Default>(file: &str) -> Result<T, String> {
-    let path = base_dir().join(file);
-    match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).map_err(|e| format!("{} の読み込みに失敗: {}", path.display(), e)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => Err(format!("{} を開けません: {}", path.display(), e)),
+/// 読み込んだ値と、利用者に知らせること (壊れたファイルを退避した、など)。
+pub struct Loaded<T> {
+    pub value: T,
+    pub notices: Vec<String>,
+}
+
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// 1 つ前に保存した内容の控え (`pcyp-rust.json.bak`)
+pub fn backup_path(path: &Path) -> PathBuf {
+    sibling(path, ".bak")
+}
+
+/// 読めなかったファイルを退避する先 (`pcyp-rust.json.broken-20260925-001637`)
+fn broken_path(path: &Path) -> PathBuf {
+    let p = sibling(path, &format!(".broken-{}", crate::win::now_stamp()));
+    // 同じ秒に 2 回退避しても上書きしない
+    (0..)
+        .map(|i| if i == 0 { p.clone() } else { sibling(&p, &format!("-{}", i)) })
+        .find(|p| !p.exists())
+        .unwrap()
+}
+
+enum ReadResult<T> {
+    Missing,
+    Ok(T),
+    Bad(String),
+}
+
+/// 読んで解釈する。ほかのソフト (ウイルス対策など) が一瞬つかんでいることがあるので、読めなければ少し待って読み直す。
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> ReadResult<T> {
+    let mut last_err = String::new();
+    for i in 0..3 {
+        if i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        match std::fs::read_to_string(path) {
+            Ok(s) => {
+                let s = s.strip_prefix('\u{feff}').unwrap_or(&s);
+                return match serde_json::from_str(s) {
+                    Ok(v) => ReadResult::Ok(v),
+                    Err(e) => ReadResult::Bad(format!("中身を読めません: {}", e)),
+                };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ReadResult::Missing,
+            Err(e) => last_err = format!("開けません: {}", e),
+        }
+    }
+    ReadResult::Bad(last_err)
+}
+
+/// 設定のファイルを読む。
+///
+/// - 本体が読めなければ、消さずに `.broken-日時` の名前で退避し、`.bak` (1 つ前の保存) から読む
+/// - `.bak` も読めなければ初期値を使う
+/// - 本体がなくて `.bak` だけあれば (保存の途中で止まったとき)、`.bak` から読む
+pub fn load_json_at<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Loaded<T> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let mut notices = Vec::new();
+    match read_json::<T>(path) {
+        ReadResult::Ok(v) => return Loaded { value: v, notices },
+        ReadResult::Missing => {}
+        ReadResult::Bad(e) => {
+            let broken = broken_path(path);
+            match std::fs::rename(path, &broken) {
+                Ok(()) => notices.push(format!(
+                    "{} を読めなかったので、{} という名前で残しました ({})",
+                    name,
+                    broken.file_name().unwrap_or_default().to_string_lossy(),
+                    e
+                )),
+                Err(re) => notices.push(format!("{} を読めません ({})。退避もできませんでした: {}", name, e, re)),
+            }
+        }
+    }
+    let bak = backup_path(path);
+    match read_json::<T>(&bak) {
+        ReadResult::Ok(v) => {
+            // notices が空なら、本体は読めなかったのではなく、なかった
+            let why = if notices.is_empty() { "がなかったので" } else { "は" };
+            notices.push(format!("{} {}、1 つ前に保存した控え ({}.bak) から読みました", name, why, name));
+            Loaded { value: v, notices }
+        }
+        ReadResult::Missing => {
+            if !notices.is_empty() {
+                notices.push(format!("{} は初期値にしました", name));
+            }
+            Loaded { value: T::default(), notices }
+        }
+        ReadResult::Bad(e) => {
+            notices.push(format!("{}.bak も読めないので ({})、{} は初期値にしました", name, e, name));
+            Loaded { value: T::default(), notices }
+        }
     }
 }
 
-/// 一時ファイルに書いてから置き換える。
-pub fn save_json<T: Serialize>(file: &str, value: &T) -> Result<(), String> {
-    let path = base_dir().join(file);
-    let tmp = path.with_extension("json.tmp");
+pub fn load_json<T: for<'de> Deserialize<'de> + Default>(file: &str) -> Loaded<T> {
+    load_json_at(&base_dir().join(file))
+}
+
+/// 保存する。
+///
+/// 1. 一時ファイルに書き、ディスクまで書き出す (停電などで中身が空にならないように)
+/// 2. 今の本体を `.bak` にする (本体が正しく読めるときだけ。壊れた本体は `.broken-日時` に退避する)
+/// 3. 一時ファイルを本体の名前にする
+///
+/// どの時点で止まっても、本体か `.bak` のどちらかに正しい内容が残る。
+pub fn save_json_at<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    use std::io::Write;
+    let tmp = sibling(path, ".tmp");
     let s = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, s).map_err(|e| format!("{} に書けません: {}", tmp.display(), e))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("{} に書けません: {}", path.display(), e))
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(s.as_bytes())?;
+        f.sync_all()
+    };
+    write().map_err(|e| format!("{} に書けません: {}", tmp.display(), e))?;
+    if path.exists() {
+        let dest = match read_json::<serde_json::Value>(path) {
+            ReadResult::Ok(_) => backup_path(path),
+            _ => broken_path(path),
+        };
+        std::fs::rename(path, &dest).map_err(|e| format!("{} を {} にできません: {}", path.display(), dest.display(), e))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("{} に書けません: {}", path.display(), e))
+}
+
+pub fn save_json<T: Serialize>(file: &str, value: &T) -> Result<(), String> {
+    save_json_at(&base_dir().join(file), value)
 }
 
 /// YP の URL として受け付けるか (http と https だけ)。
@@ -404,6 +521,119 @@ mod tests {
         assert!(parse_address("a/b:1").is_err());
         let pc = PeerCastConfig { address: "[::1]:7145".into(), ..Default::default() };
         assert_eq!(pc.base_url(), "http://[::1]:7145");
+    }
+
+    /// テスト用の空のフォルダ (終わったら消す)
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> TempDir {
+            let d = std::env::temp_dir().join(format!("pcyp-rust-test-{}-{}", name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            TempDir(d)
+        }
+
+        fn files(&self) -> Vec<String> {
+            let mut v: Vec<String> =
+                std::fs::read_dir(&self.0).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn cfg_with_interval(n: u32) -> Config {
+        Config { update_interval_min: n, ..Default::default() }
+    }
+
+    #[test]
+    fn save_keeps_previous_as_backup() {
+        let d = TempDir::new("backup");
+        let p = d.0.join("c.json");
+        save_json_at(&p, &cfg_with_interval(7)).unwrap();
+        save_json_at(&p, &cfg_with_interval(9)).unwrap();
+        assert_eq!(d.files(), ["c.json", "c.json.bak"]);
+        let now: Loaded<Config> = load_json_at(&p);
+        assert_eq!(now.value.update_interval_min, 9);
+        assert!(now.notices.is_empty());
+        let bak: Config = serde_json::from_str(&std::fs::read_to_string(backup_path(&p)).unwrap()).unwrap();
+        assert_eq!(bak.update_interval_min, 7);
+    }
+
+    #[test]
+    fn broken_file_is_kept_and_backup_is_used() {
+        let d = TempDir::new("broken");
+        let p = d.0.join("c.json");
+        save_json_at(&p, &cfg_with_interval(7)).unwrap();
+        save_json_at(&p, &cfg_with_interval(9)).unwrap();
+        std::fs::write(&p, "{ 壊れた").unwrap();
+        let l: Loaded<Config> = load_json_at(&p);
+        // 控え (1 つ前の保存) から読む
+        assert_eq!(l.value.update_interval_min, 7);
+        assert_eq!(l.notices.len(), 2);
+        // 壊れたファイルは消さずに残す
+        let files = d.files();
+        let broken: Vec<_> = files.iter().filter(|f| f.starts_with("c.json.broken-")).collect();
+        assert_eq!(broken.len(), 1);
+        assert_eq!(std::fs::read_to_string(d.0.join(broken[0])).unwrap(), "{ 壊れた");
+        assert!(!p.exists());
+    }
+
+    #[test]
+    fn empty_file_without_backup_uses_default() {
+        let d = TempDir::new("empty");
+        let p = d.0.join("c.json");
+        std::fs::write(&p, "").unwrap();
+        let l: Loaded<Config> = load_json_at(&p);
+        assert_eq!(l.value, Config::default());
+        assert!(l.notices.iter().any(|n| n.contains("初期値")));
+        // 次の保存で、退避したファイルを上書きしない
+        save_json_at(&p, &l.value).unwrap();
+        let files = d.files();
+        assert!(files.iter().any(|f| f.starts_with("c.json.broken-")));
+        assert!(files.contains(&"c.json".to_string()));
+    }
+
+    #[test]
+    fn missing_main_reads_backup() {
+        let d = TempDir::new("missing");
+        let p = d.0.join("c.json");
+        save_json_at(&p, &cfg_with_interval(7)).unwrap();
+        save_json_at(&p, &cfg_with_interval(9)).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        let l: Loaded<Config> = load_json_at(&p);
+        assert_eq!(l.value.update_interval_min, 7);
+        assert!(l.notices[0].contains("なかった"));
+    }
+
+    #[test]
+    fn first_run_is_quiet() {
+        let d = TempDir::new("first");
+        let l: Loaded<Config> = load_json_at(&d.0.join("c.json"));
+        assert_eq!(l.value, Config::default());
+        assert!(l.notices.is_empty());
+    }
+
+    #[test]
+    fn saving_over_broken_file_moves_it_aside() {
+        let d = TempDir::new("overbroken");
+        let p = d.0.join("c.json");
+        save_json_at(&p, &cfg_with_interval(7)).unwrap();
+        save_json_at(&p, &cfg_with_interval(8)).unwrap();
+        // 動いている間に、手で書き換えて壊した
+        std::fs::write(&p, "not json").unwrap();
+        save_json_at(&p, &cfg_with_interval(9)).unwrap();
+        // 控えは壊れたものに置き換えない
+        let bak: Config = serde_json::from_str(&std::fs::read_to_string(backup_path(&p)).unwrap()).unwrap();
+        assert_eq!(bak.update_interval_min, 7);
+        assert!(d.files().iter().any(|f| f.starts_with("c.json.broken-")));
+        assert!(!d.files().iter().any(|f| f.ends_with(".tmp")));
     }
 
     #[test]
