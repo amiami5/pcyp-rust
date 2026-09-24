@@ -59,7 +59,12 @@ pub enum PlayUrlKind {
     Stream,
     /// `/pls/<ID>?tip=`
     Playlist,
+    /// `custom_url` の雛形から作る
+    Custom,
 }
+
+/// 自由に書く再生の URL の初期値 (/stream/ と同じ形)
+pub const DEFAULT_CUSTOM_URL: &str = "$BASE/stream/$ID$EXT?tip=$TIP";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -74,6 +79,8 @@ pub struct PeerCastConfig {
     pub exe_path: String,
     pub launch_on_start: bool,
     pub url_kind: PlayUrlKind,
+    /// `url_kind` が Custom のときの再生の URL の雛形 (`$BASE` `$ID` `$EXT` `$TIP` など)
+    pub custom_url: String,
 }
 
 impl Default for PeerCastConfig {
@@ -86,6 +93,7 @@ impl Default for PeerCastConfig {
             exe_path: String::new(),
             launch_on_start: false,
             url_kind: PlayUrlKind::Stream,
+            custom_url: DEFAULT_CUSTOM_URL.into(),
         }
     }
 }

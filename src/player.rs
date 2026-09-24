@@ -1,7 +1,7 @@
 //! 再生用の URL を作り、プレイヤーやブラウザを起動する。
 
 use crate::chandir::{self, Channel};
-use crate::config::{Config, PeerCastConfig, PlayUrlKind};
+use crate::config::{Config, DEFAULT_CUSTOM_URL, PeerCastConfig, PlayUrlKind};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -23,11 +23,58 @@ pub fn playlist_url(pc: &PeerCastConfig, c: &Channel) -> String {
     format!("{}/pls/{}{}", base(pc), c.id, tip_query(c))
 }
 
+/// 自由に書く再生の URL で使える置き換え
+pub const URL_PLACEHOLDERS: &[(&str, &str)] = &[
+    ("$BASE", "PeerCast の http://ホスト:ポート"),
+    ("$ID", "チャンネル ID"),
+    ("$EXT", "種類に合う拡張子 (.flv など。ない種類は空)"),
+    ("$TIP", "トラッカー (URL エンコード済み)"),
+    ("$TYPE", "種類 (FLV など)"),
+    ("$NAME", "チャンネル名 (URL エンコード済み)"),
+];
+
+/// 雛形から再生の URL を作る。雛形が空なら /stream/ と同じ形。
+pub fn custom_url(pc: &PeerCastConfig, c: &Channel) -> String {
+    let template = if pc.custom_url.trim().is_empty() { DEFAULT_CUSTOM_URL } else { pc.custom_url.trim() };
+    let base = base(pc);
+    let tip = chandir::url_encode(&c.tip);
+    let name = chandir::url_encode(&c.name);
+    let table = [
+        ("$BASE", base.as_str()),
+        ("$NAME", name.as_str()),
+        ("$TYPE", c.content_type.as_str()),
+        ("$EXT", chandir::type_ext(&c.content_type)),
+        ("$TIP", tip.as_str()),
+        ("$ID", c.id.as_str()),
+    ];
+    replace_tokens(template, &table)
+}
+
 pub fn play_url(pc: &PeerCastConfig, c: &Channel) -> String {
     match pc.url_kind {
         PlayUrlKind::Stream => stream_url(pc, c),
         PlayUrlKind::Playlist => playlist_url(pc, c),
+        PlayUrlKind::Custom => custom_url(pc, c),
     }
+}
+
+/// 表の名前を値に置き換える。表は長い名前から並べる。置き換えた値の中は、もう一度置き換えない。
+fn replace_tokens(s: &str, table: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    'outer: while !rest.is_empty() {
+        for (k, v) in table {
+            if let Some(r) = rest.strip_prefix(k) {
+                out.push_str(v);
+                rest = r;
+                continue 'outer;
+            }
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
 }
 
 /// 引数の雛形を、Windows のコマンドラインと同じ規則 (空白で区切る、`"` で囲む) で分ける。
@@ -62,7 +109,7 @@ pub fn split_args(s: &str) -> Vec<String> {
 
 /// 雛形で使える置き換え。pcyplite 形式のタグも受け付ける。
 pub const PLACEHOLDERS: &[(&str, &str)] = &[
-    ("$URL", "再生用の URL (設定で /stream/ か /pls/)"),
+    ("$URL", "再生用の URL (PeerCast タブの「再生の URL」で選んだもの)"),
     ("$STREAM", "/stream/ の URL"),
     ("$PLS", "/pls/ の URL"),
     ("$NAME", "チャンネル名"),
@@ -101,27 +148,7 @@ pub fn expand_args(template: &str, pc: &PeerCastConfig, c: &Channel) -> Vec<Stri
         ("<id/>", &c.id),
         ("<tip/>", &c.tip),
     ];
-    split_args(template)
-        .into_iter()
-        .map(|arg| {
-            // 置き換えた値の中は、もう一度置き換えない
-            let mut out = String::new();
-            let mut rest = arg.as_str();
-            'outer: while !rest.is_empty() {
-                for (k, v) in &table {
-                    if let Some(r) = rest.strip_prefix(k) {
-                        out.push_str(v);
-                        rest = r;
-                        continue 'outer;
-                    }
-                }
-                let ch = rest.chars().next().unwrap();
-                out.push(ch);
-                rest = &rest[ch.len_utf8()..];
-            }
-            out
-        })
-        .collect()
+    split_args(template).into_iter().map(|arg| replace_tokens(&arg, &table)).collect()
 }
 
 /// 相対パスなら、exe のフォルダからの位置として探す。なければそのまま (PATH から探す)。
@@ -230,6 +257,20 @@ mod tests {
         assert_eq!(a[0], "--force-media-title=$URL");
         assert!(a[1].starts_with("http://127.0.0.1:7144/stream/"));
         assert_eq!(a[2], "http://example.com/");
+    }
+
+    #[test]
+    fn custom_url_template() {
+        let mut pc = PeerCastConfig { url_kind: PlayUrlKind::Custom, ..Default::default() };
+        // 初期値は /stream/ と同じ
+        assert_eq!(play_url(&pc, &ch()), stream_url(&pc, &ch()));
+        pc.custom_url = "$BASE/pls/$ID?tip=$TIP&type=$TYPE&n=$NAME".into();
+        assert_eq!(
+            play_url(&pc, &ch()),
+            "http://127.0.0.1:7144/pls/97968780D09CC97BB98D4A2BF221EDE7?tip=127.0.0.1:7144&type=FLV&n=%E4%BA%88%E5%AE%9A%E5%9C%B0%20%22x%22"
+        );
+        pc.custom_url = "  ".into();
+        assert_eq!(play_url(&pc, &ch()), stream_url(&pc, &ch()));
     }
 
     #[test]

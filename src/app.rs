@@ -1422,6 +1422,13 @@ fn validate(cfg: &mut Config) -> Result<(), String> {
     }
     config::parse_address(&cfg.peercast.address)?;
     cfg.peercast.address = cfg.peercast.address.trim().to_string();
+    cfg.peercast.custom_url = cfg.peercast.custom_url.trim().to_string();
+    if cfg.peercast.url_kind == PlayUrlKind::Custom {
+        let u = cfg.peercast.custom_url.to_ascii_lowercase();
+        if !u.is_empty() && !u.starts_with("$base") && !u.starts_with("http://") && !u.starts_with("https://") {
+            return Err("自由に書く再生の URL は $BASE か http:// か https:// で始めてください".into());
+        }
+    }
     cfg.update_interval_min = cfg.update_interval_min.max(config::MIN_AUTO_INTERVAL_MIN);
     Ok(())
 }
@@ -1497,7 +1504,9 @@ fn settings_update(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.checkbox(&mut cfg.auto_update, "自動で更新する");
     ui.horizontal(|ui| {
         ui.label("更新の間隔");
-        ui.add(egui::DragValue::new(&mut cfg.update_interval_min).range(config::MIN_AUTO_INTERVAL_MIN..=120).suffix(" 分"));
+        // 「分」は枠の外に書く (数字だけ入れればよいとわかるように)
+        ui.add(egui::DragValue::new(&mut cfg.update_interval_min).range(config::MIN_AUTO_INTERVAL_MIN..=120));
+        ui.label("分");
     });
     ui.label(
         RichText::new(format!(
@@ -1540,6 +1549,19 @@ fn settings_peercast(ui: &mut egui::Ui, cfg: &mut Config, test: &Arc<Mutex<Strin
         ui.vertical(|ui| {
             ui.radio_value(&mut pc.url_kind, PlayUrlKind::Stream, "/stream/<ID>.<拡張子>?tip=… (推奨)");
             ui.radio_value(&mut pc.url_kind, PlayUrlKind::Playlist, "/pls/<ID>?tip=… (プレイリスト)");
+            ui.radio_value(&mut pc.url_kind, PlayUrlKind::Custom, "自由に書く");
+            ui.add_enabled_ui(pc.url_kind == PlayUrlKind::Custom, |ui| {
+                ui.add_sized(
+                    [420.0, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut pc.custom_url).hint_text(config::DEFAULT_CUSTOM_URL),
+                );
+                for (k, d) in player::URL_PLACEHOLDERS {
+                    ui.horizontal(|ui| {
+                        ui.monospace(*k);
+                        ui.label(RichText::new(*d).weak());
+                    });
+                }
+            });
         });
         ui.end_row();
         ui.label("ユーザー名");
