@@ -250,6 +250,8 @@ pub struct ViewConfig {
     pub scroll_rows: u32,
     /// 一覧で省略された文字に、カーソルを合わせたとき全文を出す
     pub show_tooltips: bool,
+    /// 一覧の列の幅 (境目の線を動かして変えたもの)。列の名前ごと
+    pub column_widths: std::collections::BTreeMap<String, f32>,
     pub window_size: Option<[f32; 2]>,
 }
 
@@ -266,6 +268,7 @@ impl Default for ViewConfig {
             hide_ignored_tab: true,
             scroll_rows: 2,
             show_tooltips: false,
+            column_widths: Default::default(),
             window_size: None,
         }
     }

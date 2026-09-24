@@ -100,18 +100,58 @@ impl Col {
         })
     }
 
-    fn column(self) -> Column {
+    /// 設定に幅を保存するときの名前
+    fn key(self) -> &'static str {
         match self {
-            Col::TwoName | Col::Summary => Column::remainder().at_least(120.0).clip(true).resizable(false),
-            Col::Name => Column::initial(180.0).at_least(60.0).clip(true).resizable(true),
-            Col::Listeners | Col::TwoStats => Column::initial(88.0).at_least(40.0).resizable(true),
-            Col::Bitrate | Col::TwoRate => Column::initial(60.0).at_least(36.0).resizable(true),
-            Col::Uptime => Column::initial(50.0).at_least(30.0).resizable(true),
-            Col::Type => Column::initial(48.0).at_least(30.0).resizable(true),
-            Col::Yp => Column::initial(64.0).at_least(30.0).clip(true).resizable(true),
-            Col::Track => Column::initial(150.0).at_least(40.0).clip(true).resizable(true),
+            Col::Name => "name",
+            Col::Summary => "summary",
+            Col::Listeners => "listeners",
+            Col::Bitrate => "bitrate",
+            Col::Uptime => "uptime",
+            Col::Type => "type",
+            Col::Yp => "yp",
+            Col::Track => "track",
+            Col::TwoName => "two_name",
+            Col::TwoStats => "two_stats",
+            Col::TwoRate => "two_rate",
         }
     }
+
+    fn default_width(self) -> f32 {
+        match self {
+            Col::TwoName | Col::Summary => 300.0,
+            Col::Name => 180.0,
+            Col::Listeners => 110.0,
+            Col::TwoStats => 116.0,
+            Col::Bitrate => 70.0,
+            Col::TwoRate => 100.0,
+            Col::Uptime => 56.0,
+            Col::Type => 52.0,
+            Col::Yp => 64.0,
+            Col::Track => 150.0,
+        }
+    }
+
+    fn min_width(self) -> f32 {
+        match self {
+            Col::TwoName | Col::Summary => FLEX_MIN_WIDTH,
+            Col::Name => 60.0,
+            Col::Listeners | Col::TwoStats | Col::Track => 40.0,
+            Col::Bitrate | Col::TwoRate => 36.0,
+            Col::Uptime | Col::Type | Col::Yp => 30.0,
+        }
+    }
+}
+
+/// 残りの幅を使う列 (ウィンドウに合わせて伸び縮みする列) の最小の幅
+const FLEX_MIN_WIDTH: f32 = 120.0;
+
+/// 残りの幅を使う列。2 行表示ならチャンネル、1 行表示ならジャンル・詳細 (なければ名前)
+fn flex_col(cols: &[Col]) -> usize {
+    cols.iter()
+        .position(|c| matches!(c, Col::TwoName | Col::Summary))
+        .or_else(|| cols.iter().position(|c| *c == Col::Name))
+        .unwrap_or(0)
 }
 
 fn columns(v: &config::ViewConfig) -> Vec<Col> {
@@ -246,6 +286,8 @@ pub struct App {
     hovered_url: String,
     /// 一覧の 1 行の高さ (行の間の隙間を含む)。ホイールで進める量に使う
     row_height: f32,
+    /// 列の幅 (列の名前ごと)。ドラッグの間はここだけ変え、離したときに設定へ保存する
+    col_widths: std::collections::BTreeMap<String, f32>,
 
     settings: Option<SettingsDlg>,
     filter_dlg: Option<FilterDlg>,
@@ -318,6 +360,7 @@ impl App {
             scroll_to: None,
             hovered_url: String::new(),
             row_height: 0.0,
+            col_widths: cfg.view.column_widths.clone(),
             settings: None,
             filter_dlg: None,
             show_log: false,
@@ -517,7 +560,9 @@ impl App {
         self.recompile_filters();
     }
 
-    fn apply_config(&mut self, ctx: &egui::Context, new: Config) {
+    fn apply_config(&mut self, ctx: &egui::Context, mut new: Config) {
+        // 列の幅は画面で持っているものが正しい (設定の画面を開いた時点の古い値で上書きしない)
+        new.view.column_widths = self.col_widths.clone();
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = new.clone();
         if let Err(e) = config::save_json(config::CONFIG_FILE, &new) {
             self.log(true, e);
@@ -1022,22 +1067,30 @@ impl App {
         let mut hovered = String::new();
         ui.style_mut().interaction.selectable_labels = false;
 
+        // 列の幅: 残りの幅を使う列 (flex) はウィンドウに合わせて伸び縮みし、ほかの列はアプリで覚えた幅にする。
+        // 境目の線は egui_extras のものを使わず、表を描いたあとで自分で描いて動かす (divider_handles)。
+        let flex = flex_col(&cols);
         let mut tb = TableBuilder::new(ui)
             .striped(true)
-            .resizable(true)
+            .resizable(false)
             .sense(Sense::click())
             .auto_shrink(false)
             .cell_layout(Layout::left_to_right(Align::Center));
-        for c in &cols {
-            tb = tb.column(c.column());
+        for (k, c) in cols.iter().enumerate() {
+            tb = tb.column(if k == flex {
+                Column::remainder().at_least(FLEX_MIN_WIDTH).clip(true)
+            } else {
+                Column::exact(self.col_width(*c)).clip(true)
+            });
         }
         if let Some(i) = self.scroll_to.take() {
             tb = tb.scroll_to_row(i, None);
         }
+        let mut header_rects: Vec<egui::Rect> = Vec::new();
         let this = &*self;
         tb.header(22.0, |mut h| {
             for c in &cols {
-                h.col(|ui| {
+                let (_, resp) = h.col(|ui| {
                     let mark = match c.sort_key() {
                         Some(k) if k == this.sort.0 => if this.sort.1 { " ▼" } else { " ▲" },
                         _ => "",
@@ -1047,6 +1100,8 @@ impl App {
                         sort_click = c.sort_key();
                     }
                 });
+                // col が返す Rect は中身が使った範囲なので、列全体は Response の範囲を使う
+                header_rects.push(resp.rect);
             }
         })
         .body(|body| {
@@ -1126,10 +1181,57 @@ impl App {
             });
         });
         self.hovered_url = hovered;
+        self.divider_handles(ui, &cols, flex, &header_rects);
         if let Some(k) = sort_click {
             self.set_sort(k);
         }
         self.do_actions(actions);
+    }
+
+    fn col_width(&self, c: Col) -> f32 {
+        self.col_widths.get(c.key()).copied().unwrap_or_else(|| c.default_width()).max(c.min_width())
+    }
+
+    /// 列の境目の線を描き、ドラッグで幅を変える。
+    ///
+    /// 線は、残りの幅を使う列 (flex) から遠い側の列が持つ。flex より右の境目を左へ動かすと右の列が広がり、
+    /// flex が狭まる。ダブルクリックで、その列を初期の幅に戻す。離したときに設定へ保存する。
+    fn divider_handles(&mut self, ui: &mut egui::Ui, cols: &[Col], flex: usize, rects: &[egui::Rect]) {
+        if rects.len() != cols.len() || cols.len() < 2 {
+            return;
+        }
+        let (top, bottom) = (rects[0].top(), ui.max_rect().bottom());
+        // 返ってくる範囲の右端は列の幅より長いことがあるので、左端だけを使う
+        let gap = ui.spacing().item_spacing.x;
+        let right_of = |k: usize| if k + 1 < rects.len() { rects[k + 1].left() - gap } else { ui.max_rect().right() };
+        let flex_room = (right_of(flex) - rects[flex].left() - FLEX_MIN_WIDTH).max(0.0);
+        let mut save = false;
+        for k in 0..cols.len() - 1 {
+            let x = rects[k + 1].left() - gap / 2.0;
+            let (target, sign) = if k + 1 > flex { (cols[k + 1], -1.0) } else { (cols[k], 1.0) };
+            let hit = egui::Rect::from_x_y_ranges(x - 4.0..=x + 4.0, top..=bottom);
+            let resp = ui.interact(hit, ui.id().with(("col_divider", k)), Sense::click_and_drag());
+            let active = resp.hovered() || resp.dragged();
+            if active {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            let stroke = if active { ui.visuals().widgets.active.bg_stroke } else { ui.visuals().widgets.noninteractive.bg_stroke };
+            ui.painter().vline(x, top..=bottom, stroke);
+            if resp.dragged() {
+                let w = self.col_width(target);
+                let new_w = (w + sign * resp.drag_delta().x).clamp(target.min_width(), (w + flex_room).max(target.min_width()));
+                self.col_widths.insert(target.key().to_string(), new_w);
+            }
+            if resp.double_clicked() {
+                self.col_widths.remove(target.key());
+                save = true;
+            }
+            save |= resp.drag_stopped();
+        }
+        if save {
+            let cfg = self.cfg();
+            self.apply_config(ui.ctx(), cfg);
+        }
     }
 
     fn keyboard(&mut self, ctx: &egui::Context) {
