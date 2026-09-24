@@ -1,6 +1,6 @@
 //! ローカルの PeerCast (PeerCast YT / PeerCastStation) との連携。
 
-use crate::config::{PeerCastConfig, PeerCastKind};
+use crate::config::PeerCastConfig;
 use serde_json::{Value, json};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -159,13 +159,32 @@ pub struct VersionInfo {
     pub kind: PeerCastKind,
 }
 
+/// 接続した PeerCast の種類 (getVersionInfo の agentName から見分ける)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerCastKind {
+    /// PeerCast YT (C++ 版と Rust 版)
+    PeerCastYt,
+    PeerCastStation,
+    Unknown,
+}
+
+impl PeerCastKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            PeerCastKind::PeerCastYt => "PeerCast YT",
+            PeerCastKind::PeerCastStation => "PeerCastStation",
+            PeerCastKind::Unknown => "種類は不明",
+        }
+    }
+}
+
 pub fn detect_kind(agent: &str) -> PeerCastKind {
     if agent.contains("PeerCastStation") {
         PeerCastKind::PeerCastStation
     } else if agent.contains("PeerCast") {
         PeerCastKind::PeerCastYt
     } else {
-        PeerCastKind::Auto
+        PeerCastKind::Unknown
     }
 }
 
@@ -264,7 +283,7 @@ mod tests {
         let rpc = Rpc::new(&cfg);
         let v = rpc.version_info().expect("getVersionInfo");
         eprintln!("agent: {} ({:?})", v.agent, v.kind);
-        assert_ne!(v.kind, PeerCastKind::Auto);
+        assert_ne!(v.kind, PeerCastKind::Unknown);
         let chans = match rpc.channels() {
             Ok(c) => c,
             Err(e) if password.is_empty() => {

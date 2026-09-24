@@ -45,15 +45,6 @@ pub fn default_yps() -> Vec<YpEntry> {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum PeerCastKind {
-    /// 起動中の PeerCast から自動で判別する
-    Auto,
-    /// PeerCast YT (C++ 版と Rust 版)
-    PeerCastYt,
-    PeerCastStation,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PlayUrlKind {
     /// `/stream/<ID><ext>?tip=`
     Stream,
@@ -69,7 +60,6 @@ pub const DEFAULT_CUSTOM_URL: &str = "$BASE/stream/$ID$EXT?tip=$TIP";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PeerCastConfig {
-    pub kind: PeerCastKind,
     /// `ホスト:ポート` (例 `127.0.0.1:7144`、`[::1]:7144`)。ポートを省くと 7144。
     pub address: String,
     /// JSON-RPC 用。空なら認証しない。
@@ -86,7 +76,6 @@ pub struct PeerCastConfig {
 impl Default for PeerCastConfig {
     fn default() -> Self {
         PeerCastConfig {
-            kind: PeerCastKind::Auto,
             address: format!("127.0.0.1:{}", DEFAULT_PEERCAST_PORT),
             user: String::new(),
             password: String::new(),
@@ -359,6 +348,15 @@ mod tests {
         assert_eq!(c.peercast.host(), "192.0.2.1");
         assert_eq!(c.peercast.url_kind, PlayUrlKind::Stream);
         assert_eq!(c.yps.len(), 5);
+    }
+
+    #[test]
+    fn old_fields_are_ignored() {
+        // 前の版の設定ファイル (種類、ホストとポートが別) も読める
+        let c: Config =
+            serde_json::from_str(r#"{"peercast": {"kind": "PeerCastStation", "host": "x", "port": 1, "address": "192.0.2.1:7145"}}"#)
+                .unwrap();
+        assert_eq!(c.peercast.address, "192.0.2.1:7145");
     }
 
     #[test]

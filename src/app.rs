@@ -1,7 +1,7 @@
 //! 画面 (eframe/egui)。
 
 use crate::chandir::Channel;
-use crate::config::{self, Config, PeerCastKind, PlayUrlKind, PlayerEntry, YpEntry};
+use crate::config::{self, Config, PlayUrlKind, PlayerEntry, YpEntry};
 use crate::filter::{self, CompiledFilter, FIELDS, Filter, Filters, Search};
 use crate::peercast::{self, RelayChannel, Rpc};
 use crate::player;
@@ -1521,19 +1521,6 @@ fn settings_update(ui: &mut egui::Ui, cfg: &mut Config) {
 fn settings_peercast(ui: &mut egui::Ui, cfg: &mut Config, test: &Arc<Mutex<String>>) {
     let pc = &mut cfg.peercast;
     egui::Grid::new("pc").num_columns(2).show(ui, |ui| {
-        ui.label("種類");
-        egui::ComboBox::from_id_salt("pckind")
-            .selected_text(match pc.kind {
-                PeerCastKind::Auto => "自動",
-                PeerCastKind::PeerCastYt => "PeerCast YT (C++ / Rust)",
-                PeerCastKind::PeerCastStation => "PeerCastStation",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut pc.kind, PeerCastKind::Auto, "自動");
-                ui.selectable_value(&mut pc.kind, PeerCastKind::PeerCastYt, "PeerCast YT (C++ / Rust)");
-                ui.selectable_value(&mut pc.kind, PeerCastKind::PeerCastStation, "PeerCastStation");
-            });
-        ui.end_row();
         ui.label("アドレス");
         ui.horizontal(|ui| {
             let ok = config::parse_address(&pc.address).is_ok();
@@ -1596,7 +1583,7 @@ fn settings_peercast(ui: &mut egui::Ui, cfg: &mut Config, test: &Arc<Mutex<Strin
                     format!("{} につながりません。PeerCast が起動しているか確かめてください", pc.base_url())
                 } else {
                     match Rpc::new(&pc).version_info() {
-                        Ok(v) => format!("OK: {} ({:?})", v.agent, v.kind),
+                        Ok(v) => format!("OK: {} ({})", v.agent, v.kind.label()),
                         Err(e) => format!("ポートは開いていますが、JSON-RPC に失敗しました: {}", e),
                     }
                 };
