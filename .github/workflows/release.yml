@@ -1,0 +1,59 @@
+# リリース用の zip を GitHub のサーバーでビルドして、リリースに添付する。
+#
+# - v で始まるタグを push すると動く
+# - Actions の画面 (または gh workflow run) から、タグ名を指定して手で動かすこともできる
+#
+# そのタグのリリースがあれば zip を置き換え、なければ下書きのリリースを作る。
+# 公開は、中身を確かめてから手で行う。
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "添付するリリースのタグ (例 v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust の準備
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: テスト
+        run: cargo test --locked
+
+      - name: ビルド
+        run: cargo build --release --locked
+
+      - name: zip にまとめる
+        shell: pwsh
+        run: |
+          $name = "pcyp-rust-$env:TAG-windows-x64"
+          New-Item -ItemType Directory -Force $name | Out-Null
+          Copy-Item target/release/pcyp-rust.exe, LICENSE, README.md $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip" -Force
+          "ZIP=$name.zip" >> $env:GITHUB_ENV
+
+      - name: リリースに添付する
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG $env:ZIP --clobber
+          } else {
+            gh release create $env:TAG $env:ZIP --draft --title $env:TAG --generate-notes
+          }
