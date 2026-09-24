@@ -102,7 +102,7 @@ impl Col {
 
     fn column(self) -> Column {
         match self {
-            Col::TwoName | Col::Summary => Column::remainder().at_least(120.0).clip(true),
+            Col::TwoName | Col::Summary => Column::remainder().at_least(120.0).clip(true).resizable(false),
             Col::Name => Column::initial(180.0).at_least(60.0).clip(true).resizable(true),
             Col::Listeners | Col::TwoStats => Column::initial(88.0).at_least(40.0).resizable(true),
             Col::Bitrate | Col::TwoRate => Column::initial(60.0).at_least(36.0).resizable(true),
@@ -146,7 +146,8 @@ fn columns(v: &config::ViewConfig) -> Vec<Col> {
     if c.track {
         out.push(Col::Track);
     }
-    if c.yp {
+    // 2 行表示では、YP 名は名前の行の右端に出す
+    if c.yp && !v.two_line {
         out.push(Col::Yp);
     }
     out
@@ -155,6 +156,8 @@ fn columns(v: &config::ViewConfig) -> Vec<Col> {
 struct Row {
     ch: Channel,
     yp: String,
+    /// 当たったフィルターの名前
+    filters: Vec<String>,
     favorite: bool,
     ignore: bool,
     color: Option<Color32>,
@@ -411,6 +414,7 @@ impl App {
                     ignore: m.ignore,
                     color: color_of(&m.colors),
                     is_new: s.new_keys.contains(&key),
+                    filters: m.names.clone(),
                     duplicate,
                 });
             }
@@ -781,6 +785,35 @@ impl App {
         if self.has_bold { t.family(FontFamily::Name(BOLD.into())) } else { t.strong() }
     }
 
+    /// 右端に出す札: 当たったフィルターの名前と、2 行表示なら YP 名 (pcyplite と同じ)
+    fn row_tag(r: &Row, cfg: &Config) -> String {
+        let mut parts = r.filters.clone();
+        if cfg.view.two_line && cfg.view.columns.yp {
+            parts.push(r.yp.clone());
+        }
+        parts.join(", ")
+    }
+
+    /// 名前の行: 左に NEW と名前、右端に札
+    fn name_line(&self, ui: &mut egui::Ui, r: &Row, cfg: &Config) {
+        let tag = Self::row_tag(r, cfg);
+        let tag_color = if ui.visuals().dark_mode { Color32::from_rgb(255, 120, 120) } else { Color32::from_rgb(230, 50, 50) };
+        // 幅と高さを決めて確保する (右寄せが列の幅を押し広げないように)
+        let size = egui::vec2(ui.available_width(), ui.text_style_height(&egui::TextStyle::Body));
+        ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), |ui| {
+            ui.set_max_width(size.x);
+            if !tag.is_empty() {
+                ui.label(RichText::new(tag).color(tag_color));
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                if r.is_new {
+                    ui.label(RichText::new("NEW").small().color(Color32::from_rgb(230, 120, 0)));
+                }
+                ui.add(egui::Label::new(self.name_text(ui, r)).truncate());
+            });
+        });
+    }
+
     fn info_panel(&mut self, ui: &mut egui::Ui, idx: usize) {
         let c = self.rows[idx].ch.clone();
         let yp = self.rows[idx].yp.clone();
@@ -972,21 +1005,11 @@ impl App {
                         match col {
                             Col::TwoName => {
                                 ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        if r.is_new {
-                                            ui.label(RichText::new("NEW").small().color(Color32::from_rgb(230, 120, 0)));
-                                        }
-                                        ui.add(egui::Label::new(this.name_text(ui, r)).truncate());
-                                    });
+                                    this.name_line(ui, r, cfg);
                                     ui.add(egui::Label::new(c.summary()).truncate());
                                 });
                             }
-                            Col::Name => {
-                                if r.is_new {
-                                    ui.label(RichText::new("NEW").small().color(Color32::from_rgb(230, 120, 0)));
-                                }
-                                ui.add(egui::Label::new(this.name_text(ui, r)).truncate());
-                            }
+                            Col::Name => this.name_line(ui, r, cfg),
                             Col::Summary => {
                                 ui.add(egui::Label::new(c.summary()).truncate());
                             }

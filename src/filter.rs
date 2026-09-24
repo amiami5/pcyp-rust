@@ -95,6 +95,8 @@ struct CompiledSearch {
 }
 
 pub struct CompiledFilter {
+    /// 一覧に出す名前 (フィルターの名前、なければ条件)
+    pub title: String,
     pub favorite: bool,
     pub ignore: bool,
     pub notify: bool,
@@ -111,6 +113,8 @@ pub struct MatchResult {
     pub ignore: bool,
     pub notify: bool,
     pub colors: Vec<[u8; 3]>,
+    /// 当たったフィルターの名前
+    pub names: Vec<String>,
 }
 
 fn compile_search(s: &Search, ignore_case: bool) -> Result<CompiledSearch, String> {
@@ -139,6 +143,7 @@ pub fn compile(filters: &[Filter]) -> (Vec<CompiledFilter>, Vec<String>) {
             let and = if f.and_search.enabled { Some(compile_search(&f.and_search, f.ignore_case)?) } else { None };
             let not = if f.not_search.enabled { Some(compile_search(&f.not_search, f.ignore_case)?) } else { None };
             Ok(CompiledFilter {
+                title: f.title().to_string(),
                 favorite: f.favorite,
                 ignore: f.ignore,
                 notify: f.notify,
@@ -193,6 +198,9 @@ pub fn apply(filters: &[CompiledFilter], c: &Channel, yp: &str) -> MatchResult {
             if let Some(col) = f.color {
                 r.colors.push(col);
             }
+            if !r.names.contains(&f.title) {
+                r.names.push(f.title.clone());
+            }
         }
     }
     r
@@ -230,6 +238,7 @@ mod tests {
         assert_eq!(e.len(), 1);
         assert!(apply(&c, &ch("a.b", ""), "").ignore);
         assert!(!apply(&c, &ch("axb", ""), "").ignore);
+        assert_eq!(apply(&c, &ch("a.b", ""), "").names, ["a.b"]);
     }
 
     #[test]
