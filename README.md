@@ -30,7 +30,7 @@ Windows 用の PeerCast YP ブラウザです。Rust だけで書いています
 [Rust](https://www.rust-lang.org/ja/tools/install) (stable、1.93 以上) を入れてから、次を実行します。
 
 ```
-git clone <このリポジトリの URL>
+git clone https://github.com/amiami5/pcyp-rust.git
 cd pcyp-rust
 cargo build --release
 ```
