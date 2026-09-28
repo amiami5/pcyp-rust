@@ -300,21 +300,24 @@ struct PcStatus {
     agent: String,
 }
 
-/// 再生を始めたチャンネルが PeerCast でつながるまでを見張る長さ
+/// 再生を始めてから、プレイヤーの窓が出るか PeerCast が受信し始めるまでを見張る長さ
 const PLAY_WATCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 見張りの終わり方
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 enum PlayOutcome {
-    /// 受信が始まった (かかった時間)
+    /// プレイヤーの窓が出た (かかった時間)
+    Opened(Duration),
+    /// PeerCast が受信し始めた (かかった時間)。窓は見つからなかった
     Receiving(Duration),
-    /// 待っても受信にならなかった
+    /// 待っても窓が出ず、受信にもならなかった
     TimedOut(Duration),
-    /// PeerCast に様子を聞けなかった (別の PC の PeerCast でパスワードがない、など)
+    /// 窓が出ないままプレイヤーが終わり、PeerCast にも様子を聞けない
+    /// (開いているプレイヤーに URL を渡して終わる作りのプレイヤー、など)
     Unknown,
 }
 
-/// 再生を始めたチャンネルの、PeerCast での接続の進み具合 (右下に出す)
+/// 再生を始めたチャンネルの、プレイヤーと PeerCast の様子 (右下に出す)
 #[derive(Clone)]
 struct PlayWatch {
     id: String,
@@ -322,7 +325,7 @@ struct PlayWatch {
     started: Instant,
     /// getChannels の status。まだ PeerCast の一覧にないなら空
     status: String,
-    /// PeerCast に問い合わせられなかったときの理由
+    /// PeerCast に問い合わせられなかったときの理由 (別の PC の PeerCast はパスワードがないと断る)
     error: String,
     /// 見張りが終わったら、その終わり方
     result: Option<PlayOutcome>,
@@ -331,6 +334,7 @@ struct PlayWatch {
 impl PlayWatch {
     fn state_text(&self) -> &'static str {
         match self.status.as_str() {
+            _ if !self.error.is_empty() => "プレイヤーが開くのを待っています",
             "" => "PeerCast の接続を待っています",
             "Searching" => "接続先を探しています",
             "Connecting" => "つないでいます",
@@ -673,17 +677,18 @@ impl App {
 
     fn play(&self, ch: &Channel) {
         match player::play(&self.cfg(), ch) {
-            Ok(cmd) => {
+            Ok((cmd, pid)) => {
                 self.log(false, format!("再生: {}", cmd));
-                self.watch_play(ch);
+                self.watch_play(ch, pid);
             }
             Err(e) => self.log(true, e),
         }
     }
 
-    /// PeerCast がそのチャンネルを受信し始めるまで、1 秒おきに getChannels で様子を見る。
+    /// プレイヤーの窓が出るか、PeerCast がそのチャンネルを受信し始めるまで様子を見る。
+    /// 窓は、起動したプロセスとその子孫のもの (ほかを起動して終わる作りのプレイヤーもあるので) を探す。
     /// 新しく別の再生を始めたら、古い見張りはそこでやめる。
-    fn watch_play(&self, ch: &Channel) {
+    fn watch_play(&self, ch: &Channel, pid: u32) {
         let started = Instant::now();
         let id = ch.id.to_ascii_uppercase();
         *self.play_watch.lock().unwrap_or_else(|e| e.into_inner()) = Some(PlayWatch {
@@ -696,30 +701,45 @@ impl App {
         });
         let (config, watch) = (self.config.clone(), self.play_watch.clone());
         std::thread::spawn(move || {
+            let mut pids = HashSet::from([pid]);
+            // 別の PC の PeerCast は、パスワードがないと getChannels を断る (再生の URL はパスワードなしで通る)。
+            // 一度断られたら、あとはプレイヤーの窓だけを見る
+            let mut rpc_ok = true;
+            let mut last_rpc: Option<Instant> = None;
             let outcome = loop {
-                let pc = read(&config).peercast;
-                // 聞けないなら待っても様子は分からないので、そこでやめる (別の PC の PeerCast は、
-                // パスワードがないと getChannels を断る。再生の URL はパスワードなしで通る)
-                let cs = match Rpc::new(&pc).channels() {
-                    Ok(cs) => cs,
-                    Err(e) => {
-                        with_watch(&watch, started, |w| w.error = e);
-                        break PlayOutcome::Unknown;
-                    }
-                };
-                let status = cs.into_iter().find(|c| c.id == id).map(|c| c.status).unwrap_or_default();
-                let receiving = status == "Receiving";
-                if !with_watch(&watch, started, |w| w.status = status) {
-                    return;
+                let alive = win::track_process_tree(&mut pids);
+                if win::has_visible_window(&pids) {
+                    break PlayOutcome::Opened(started.elapsed());
                 }
-                win::request_repaint();
-                if receiving {
-                    break PlayOutcome::Receiving(started.elapsed());
+                if rpc_ok && last_rpc.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+                    last_rpc = Some(Instant::now());
+                    let pc = read(&config).peercast;
+                    let res = Rpc::new(&pc).channels();
+                    let status = match &res {
+                        Ok(cs) => cs.iter().find(|c| c.id == id).map(|c| c.status.clone()).unwrap_or_default(),
+                        Err(_) => String::new(),
+                    };
+                    rpc_ok = res.is_ok();
+                    let receiving = status == "Receiving";
+                    if !with_watch(&watch, started, |w| {
+                        w.status = status;
+                        w.error = res.err().unwrap_or_default();
+                    }) {
+                        return;
+                    }
+                    if receiving {
+                        break PlayOutcome::Receiving(started.elapsed());
+                    }
+                }
+                // プレイヤーが窓を出さずに終わったら、あとは PeerCast に聞くしかない
+                if !alive && !rpc_ok {
+                    break PlayOutcome::Unknown;
                 }
                 if started.elapsed() >= PLAY_WATCH_TIMEOUT {
                     break PlayOutcome::TimedOut(started.elapsed());
                 }
-                std::thread::sleep(Duration::from_secs(1));
+                win::request_repaint();
+                std::thread::sleep(Duration::from_millis(250));
             };
             if !with_watch(&watch, started, |w| w.result = Some(outcome)) {
                 return;
@@ -1020,9 +1040,12 @@ impl App {
         };
         let name: String = if w.name.chars().count() > 20 { w.name.chars().take(19).chain(Some('…')).collect() } else { w.name.clone() };
         let (text, color) = match w.result {
+            Some(PlayOutcome::Opened(t)) => {
+                (format!("✔ {} プレイヤーが開きました ({}秒)", name, t.as_secs()), Some(Color32::from_rgb(40, 170, 70)))
+            }
             Some(PlayOutcome::Receiving(t)) => (format!("✔ {} 受信中 ({}秒)", name, t.as_secs()), Some(Color32::from_rgb(40, 170, 70))),
             Some(PlayOutcome::TimedOut(t)) => {
-                (format!("✖ {} {}秒たってもつながりません", name, t.as_secs()), Some(Color32::from_rgb(220, 60, 60)))
+                (format!("✖ {} {}秒たってもプレイヤーが開きません", name, t.as_secs()), Some(Color32::from_rgb(220, 60, 60)))
             }
             Some(PlayOutcome::Unknown) => (format!("▶ {} プレイヤーを起動しました", name), None),
             None => (format!("{} {} {}秒", name, w.state_text(), w.started.elapsed().as_secs()), None),
