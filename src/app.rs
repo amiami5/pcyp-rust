@@ -578,6 +578,10 @@ impl App {
         };
         v.sort_by(|&a, &b| {
             let (a, b) = (&rows[a], &rows[b]);
+            // 0. YP のお知らせは、並べ方によらず常に一番下
+            if a.ch.is_info() != b.ch.is_info() {
+                return a.ch.is_info().cmp(&b.ch.is_info());
+            }
             // 1. お気に入りを上に (選んでいれば)
             if fav_first && a.favorite != b.favorite {
                 return b.favorite.cmp(&a.favorite);
