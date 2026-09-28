@@ -106,6 +106,33 @@ mod imp {
     }
 
     /// 窓の通常の位置と大きさを変える。見えていない窓は見えないまま (表示されたときにその位置に出る)。
+    /// exe に埋め込んだアイコン (src/build.rs のリソース番号 1) を、窓と窓の種類 (ウィンドウクラス) に付ける。
+    ///
+    /// タスクマネージャーなどは窓の種類のアイコンを見るが、winit が作る窓の種類にはアイコンがなく、
+    /// 標準のアイコンが出ていた。画面の拡大率に合った大きさで読み込むので、タイトルバーなどもくっきりする。
+    pub fn apply_exe_icon() {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+        let Some(h) = hwnd() else { return };
+        let dpi = match unsafe { GetDpiForWindow(h) } {
+            0 => 96,
+            d => d as i32,
+        };
+        let inst = unsafe { GetModuleHandleW(std::ptr::null()) };
+        let load = |size: i32| unsafe { LoadImageW(inst, 1 as windows_sys::core::PCWSTR, IMAGE_ICON, size, size, LR_DEFAULTCOLOR) };
+        let (big, small) = (load(32 * dpi / 96), load(16 * dpi / 96));
+        unsafe {
+            if !big.is_null() {
+                SendMessageW(h, WM_SETICON, ICON_BIG as usize, big as isize);
+                SetClassLongPtrW(h, GCLP_HICON, big as isize);
+            }
+            if !small.is_null() {
+                SendMessageW(h, WM_SETICON, ICON_SMALL as usize, small as isize);
+                SetClassLongPtrW(h, GCLP_HICONSM, small as isize);
+            }
+        }
+    }
+
     pub fn set_window_rect(r: [i32; 4]) {
         let Some(h) = hwnd() else { return };
         let Some(mut wp) = placement(h) else { return };
@@ -147,13 +174,16 @@ mod imp {
     pub fn window_rect() -> Option<[i32; 4]> {
         None
     }
+    pub fn apply_exe_icon() {}
     pub fn set_window_rect(_r: [i32; 4]) {}
     pub fn rect_is_on_screen(_r: [i32; 4]) -> bool {
         false
     }
 }
 
-pub use imp::{hide_window, is_window_visible, post_close, rect_is_on_screen, set_window_rect, show_window, window_rect};
+pub use imp::{
+    apply_exe_icon, hide_window, is_window_visible, post_close, rect_is_on_screen, set_window_rect, show_window, window_rect,
+};
 
 /// 画面の中にあるかを調べるときの、タイトルバーのあたりの高さ (ピクセル)
 const TITLE_STRIP: i32 = 30;
@@ -189,31 +219,7 @@ pub fn now_stamp() -> String {
 /// ウィンドウのアイコン (一度だけ作る)。
 pub fn app_icon() -> Arc<eframe::egui::IconData> {
     static ICON: OnceLock<Arc<eframe::egui::IconData>> = OnceLock::new();
-    ICON.get_or_init(|| Arc::new(eframe::egui::IconData { rgba: icon_rgba(64), width: 64, height: 64 })).clone()
-}
-
-/// アプリのアイコン (青い丸に白い三角) の RGBA。
-pub fn icon_rgba(size: u32) -> Vec<u8> {
-    let mut v = vec![0u8; (size * size * 4) as usize];
-    let c = size as f32 / 2.0;
-    let r = c - 0.5;
-    for y in 0..size {
-        for x in 0..size {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let d = ((fx - c).powi(2) + (fy - c).powi(2)).sqrt();
-            let a = (r - d + 0.5).clamp(0.0, 1.0);
-            if a <= 0.0 {
-                continue;
-            }
-            // 再生の三角
-            let (tx, ty) = ((fx - c) / r, (fy - c) / r);
-            let inside = tx > -0.35 && tx < 0.55 && ty.abs() < (0.55 - tx) * 0.62;
-            let (cr, cg, cb) = if inside { (255, 255, 255) } else { (30, 110, 220) };
-            let i = ((y * size + x) * 4) as usize;
-            v[i..i + 4].copy_from_slice(&[cr, cg, cb, (a * 255.0) as u8]);
-        }
-    }
-    v
+    ICON.get_or_init(|| Arc::new(eframe::egui::IconData { rgba: crate::icon::icon_rgba(64), width: 64, height: 64 })).clone()
 }
 
 /// お気に入りのチャンネルが始まったことを通知する。「再生」のボタンを押すと再生する。
@@ -288,7 +294,7 @@ pub fn create_tray(tx: Sender<Command>, open_settings: Arc<std::sync::atomic::At
     let menu = Menu::new();
     menu.append_items(&[&show, &refresh, &settings, &PredefinedMenuItem::separator(), &quit]).map_err(|e| e.to_string())?;
 
-    let icon = tray_icon::Icon::from_rgba(icon_rgba(32), 32, 32).map_err(|e| e.to_string())?;
+    let icon = tray_icon::Icon::from_rgba(crate::icon::icon_rgba(32), 32, 32).map_err(|e| e.to_string())?;
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)

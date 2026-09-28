@@ -9,7 +9,7 @@ use crate::win;
 use crate::worker::{Command, FetchState, SharedRef, lock};
 use eframe::egui::{self, Align, Color32, FontFamily, Key, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
@@ -343,6 +343,7 @@ pub struct App {
     filter_dlg: Option<FilterDlg>,
     show_log: bool,
     show_relay: bool,
+    subs: SubWindows,
     relay: Arc<Mutex<RelayState>>,
     relay_last: Option<Instant>,
     pc_status: Arc<Mutex<PcStatus>>,
@@ -416,6 +417,7 @@ impl App {
             filter_dlg: None,
             show_log: false,
             show_relay: false,
+            subs: SubWindows { rects: cfg.view.sub_windows.clone(), ..Default::default() },
             relay: Arc::new(Mutex::new(RelayState::default())),
             relay_last: None,
             pc_status: Arc::new(Mutex::new(PcStatus::default())),
@@ -576,6 +578,10 @@ impl App {
         };
         v.sort_by(|&a, &b| {
             let (a, b) = (&rows[a], &rows[b]);
+            // 0. YP のお知らせは、並べ方によらず常に一番下
+            if a.ch.is_info() != b.ch.is_info() {
+                return a.ch.is_info().cmp(&b.ch.is_info());
+            }
             // 1. お気に入りを上に (選んでいれば)
             if fav_first && a.favorite != b.favorite {
                 return b.favorite.cmp(&a.favorite);
@@ -1352,7 +1358,7 @@ impl App {
 
     fn log_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_log;
-        sub_window(ctx, "log", "ログ", [640.0, 360.0], &mut open, |ui| {
+        sub_window(ctx, &mut self.subs, "log", "ログ", [640.0, 360.0], &mut open, |ui| {
             let mut s = lock(&self.shared);
             if ui.button("クリア").clicked() {
                 s.log.clear();
@@ -1378,7 +1384,7 @@ impl App {
         let mut open = true;
         let mut actions = Vec::new();
         let mut reload = false;
-        sub_window(ctx, "relay", "接続中のチャンネル (PeerCast)", [600.0, 300.0], &mut open, |ui| {
+        sub_window(ctx, &mut self.subs, "relay", "接続中のチャンネル (PeerCast)", [600.0, 300.0], &mut open, |ui| {
             let r = self.relay.lock().unwrap_or_else(|e| e.into_inner());
             ui.horizontal(|ui| {
                 if ui.button("⟳ 再読み込み").clicked() {
@@ -1430,7 +1436,7 @@ impl App {
         let mut open = true;
         let mut result: Option<bool> = None; // Some(true) で閉じる、Some(false) で適用だけ
         let mut cancel = false;
-        sub_window(ctx, "settings", "設定", [780.0, 760.0], &mut open, |ui| {
+        sub_window(ctx, &mut self.subs, "settings", "設定", [780.0, 760.0], &mut open, |ui| {
             ui.horizontal(|ui| {
                 for (t, label) in [
                     (SettingsTab::Yp, "YP"),
@@ -1496,7 +1502,7 @@ impl App {
         let mut open = true;
         let mut apply = None;
         let mut cancel = false;
-        sub_window(ctx, "filters", "フィルター (お気に入り・無視・色分け)", [900.0, 560.0], &mut open, |ui| {
+        sub_window(ctx, &mut self.subs, "filters", "フィルター (お気に入り・無視・色分け)", [900.0, 560.0], &mut open, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("追加").clicked() {
                     dlg.filters.push(Filter::default());
@@ -1610,6 +1616,7 @@ impl App {
                 if let Some(r) = win::window_rect() {
                     c.view.window_rect = Some(r);
                 }
+                c.view.sub_windows = self.subs.rects.clone();
                 if let Err(e) = config::save_json(config::CONFIG_FILE, &c) {
                     eprintln!("{}", e);
                 }
@@ -1622,19 +1629,75 @@ impl App {
     }
 }
 
+/// 別窓の位置と大きさを覚えておく。次に開くとき (次の起動も含む) は、最後にあった位置に開く。
+#[derive(Default)]
+struct SubWindows {
+    /// 最後の位置と大きさ ([左, 上, 幅, 高さ]、egui の座標)。窓の名前ごと
+    rects: std::collections::BTreeMap<String, [f32; 4]>,
+    /// 開いている窓を作ったときの位置と大きさ。開いている間は変えない
+    /// (毎回違う値を渡すと、egui が窓をその位置へ動かし直してしまう)
+    opened: HashMap<String, (Option<[f32; 2]>, [f32; 2])>,
+    /// このフレームで出した窓。出さなかった窓は閉じたとみなして `opened` から消す
+    shown: HashSet<String>,
+}
+
+impl SubWindows {
+    /// 窓を作るときの位置と大きさ。覚えた位置が画面の外 (モニターを外したなど) なら、大きさだけ使う。
+    fn initial(&mut self, ctx: &egui::Context, id: &str, size: [f32; 2]) -> (Option<[f32; 2]>, [f32; 2]) {
+        self.shown.insert(id.to_string());
+        if let Some(v) = self.opened.get(id) {
+            return *v;
+        }
+        let v = match self.rects.get(id) {
+            Some(&[x, y, w, h]) => {
+                let ppp = ctx.pixels_per_point();
+                let px = [x * ppp, y * ppp, (x + w) * ppp, (y + h) * ppp].map(|v| v.round() as i32);
+                (win::rect_is_on_screen(px).then_some([x, y]), [w, h])
+            }
+            None => (None, size),
+        };
+        self.opened.insert(id.to_string(), v);
+        v
+    }
+
+    fn end_frame(&mut self) {
+        let shown = std::mem::take(&mut self.shown);
+        self.opened.retain(|id, _| shown.contains(id));
+    }
+}
+
 /// メインとは別の OS のウィンドウを開く (自由に移動・サイズ変更できる)。閉じるボタンで `open` を false にする。
-fn sub_window(ctx: &egui::Context, id: &str, title: &str, size: [f32; 2], open: &mut bool, mut add: impl FnMut(&mut egui::Ui)) {
+fn sub_window(
+    ctx: &egui::Context,
+    subs: &mut SubWindows,
+    id: &str,
+    title: &str,
+    size: [f32; 2],
+    open: &mut bool,
+    mut add: impl FnMut(&mut egui::Ui),
+) {
     if !*open {
         return;
     }
-    let builder = egui::ViewportBuilder::default()
+    let (pos, size) = subs.initial(ctx, id, size);
+    let mut builder = egui::ViewportBuilder::default()
         .with_title(title)
         .with_inner_size(size)
         .with_min_inner_size([320.0, 200.0])
         .with_icon(win::app_icon());
+    if let Some(p) = pos {
+        builder = builder.with_position(p);
+    }
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(id), builder, |ui, _class| {
-        if ui.ctx().input(|i| i.viewport().close_requested()) {
+        let (close, outer, inner, normal) = ui.ctx().input(|i| {
+            let v = i.viewport();
+            (v.close_requested(), v.outer_rect, v.inner_rect, v.minimized != Some(true) && v.maximized != Some(true))
+        });
+        if close {
             *open = false;
+        }
+        if normal && let (Some(o), Some(r)) = (outer, inner) {
+            subs.rects.insert(id.to_string(), [o.min.x, o.min.y, r.width(), r.height()]);
         }
         egui::CentralPanel::default().show(ui, |ui| add(ui));
     });
@@ -2148,6 +2211,7 @@ impl eframe::App for App {
         self.filter_window(&ctx);
         self.log_window(&ctx);
         self.relay_window(&ctx);
+        self.subs.end_frame();
 
         // 並べ替えを変えたら、次の起動でも同じ順になるよう保存する
         if cfg.view.sort_key != self.sort.0.key() || cfg.view.sort_desc != self.sort.1 || cfg.view.favorites_first != self.fav_first {
