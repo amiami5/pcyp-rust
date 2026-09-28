@@ -303,6 +303,17 @@ struct PcStatus {
 /// 再生を始めたチャンネルが PeerCast でつながるまでを見張る長さ
 const PLAY_WATCH_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 見張りの終わり方
+#[derive(Clone, Copy, PartialEq)]
+enum PlayOutcome {
+    /// 受信が始まった (かかった時間)
+    Receiving(Duration),
+    /// 待っても受信にならなかった
+    TimedOut(Duration),
+    /// PeerCast に様子を聞けなかった (別の PC の PeerCast でパスワードがない、など)
+    Unknown,
+}
+
 /// 再生を始めたチャンネルの、PeerCast での接続の進み具合 (右下に出す)
 #[derive(Clone)]
 struct PlayWatch {
@@ -313,14 +324,13 @@ struct PlayWatch {
     status: String,
     /// PeerCast に問い合わせられなかったときの理由
     error: String,
-    /// 見張りが終わったら (つながったか, かかった時間)
-    result: Option<(bool, Duration)>,
+    /// 見張りが終わったら、その終わり方
+    result: Option<PlayOutcome>,
 }
 
 impl PlayWatch {
     fn state_text(&self) -> &'static str {
         match self.status.as_str() {
-            _ if !self.error.is_empty() => "接続の様子を確かめられません",
             "" => "PeerCast の接続を待っています",
             "Searching" => "接続先を探しています",
             "Connecting" => "つないでいます",
@@ -686,36 +696,38 @@ impl App {
         });
         let (config, watch) = (self.config.clone(), self.play_watch.clone());
         std::thread::spawn(move || {
-            let ok = loop {
+            let outcome = loop {
                 let pc = read(&config).peercast;
-                let res = Rpc::new(&pc).channels();
-                let status = match &res {
-                    Ok(cs) => cs.iter().find(|c| c.id == id).map(|c| c.status.clone()).unwrap_or_default(),
-                    Err(_) => String::new(),
+                // 聞けないなら待っても様子は分からないので、そこでやめる (別の PC の PeerCast は、
+                // パスワードがないと getChannels を断る。再生の URL はパスワードなしで通る)
+                let cs = match Rpc::new(&pc).channels() {
+                    Ok(cs) => cs,
+                    Err(e) => {
+                        with_watch(&watch, started, |w| w.error = e);
+                        break PlayOutcome::Unknown;
+                    }
                 };
+                let status = cs.into_iter().find(|c| c.id == id).map(|c| c.status).unwrap_or_default();
                 let receiving = status == "Receiving";
-                let alive = with_watch(&watch, started, |w| {
-                    w.status = status;
-                    w.error = res.err().unwrap_or_default();
-                });
-                if !alive {
+                if !with_watch(&watch, started, |w| w.status = status) {
                     return;
                 }
                 win::request_repaint();
                 if receiving {
-                    break true;
+                    break PlayOutcome::Receiving(started.elapsed());
                 }
                 if started.elapsed() >= PLAY_WATCH_TIMEOUT {
-                    break false;
+                    break PlayOutcome::TimedOut(started.elapsed());
                 }
                 std::thread::sleep(Duration::from_secs(1));
             };
-            if !with_watch(&watch, started, |w| w.result = Some((ok, started.elapsed()))) {
+            if !with_watch(&watch, started, |w| w.result = Some(outcome)) {
                 return;
             }
             win::request_repaint();
             // 結果をしばらく出してから消す
-            std::thread::sleep(Duration::from_secs(if ok { 5 } else { 20 }));
+            let keep = if let PlayOutcome::TimedOut(_) = outcome { 20 } else { 5 };
+            std::thread::sleep(Duration::from_secs(keep));
             let mut w = watch.lock().unwrap_or_else(|e| e.into_inner());
             if w.as_ref().is_some_and(|w| w.started == started) {
                 *w = None;
@@ -1008,8 +1020,11 @@ impl App {
         };
         let name: String = if w.name.chars().count() > 20 { w.name.chars().take(19).chain(Some('…')).collect() } else { w.name.clone() };
         let (text, color) = match w.result {
-            Some((true, t)) => (format!("✔ {} 受信中 ({}秒)", name, t.as_secs()), Some(Color32::from_rgb(40, 170, 70))),
-            Some((false, t)) => (format!("✖ {} {}秒たってもつながりません", name, t.as_secs()), Some(Color32::from_rgb(220, 60, 60))),
+            Some(PlayOutcome::Receiving(t)) => (format!("✔ {} 受信中 ({}秒)", name, t.as_secs()), Some(Color32::from_rgb(40, 170, 70))),
+            Some(PlayOutcome::TimedOut(t)) => {
+                (format!("✖ {} {}秒たってもつながりません", name, t.as_secs()), Some(Color32::from_rgb(220, 60, 60)))
+            }
+            Some(PlayOutcome::Unknown) => (format!("▶ {} プレイヤーを起動しました", name), None),
             None => (format!("{} {} {}秒", name, w.state_text(), w.started.elapsed().as_secs()), None),
         };
         let t = RichText::new(text);
@@ -1022,7 +1037,7 @@ impl App {
             hover.push_str(&format!("\nPeerCast の状態: {}", w.status));
         }
         if !w.error.is_empty() {
-            hover.push_str(&format!("\n{}", w.error));
+            hover.push_str(&format!("\nPeerCast に接続の様子を聞けませんでした: {}", w.error));
         }
         hover.push_str("\nクリックで接続中のチャンネルを表示");
         // 右から並べるので、文字を先に置くとくるくるはその左に出る
