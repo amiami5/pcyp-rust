@@ -163,8 +163,8 @@ pub fn resolve_exe(path: &str) -> PathBuf {
     p
 }
 
-/// チャンネルを再生する。起動したコマンドの説明を返す。
-pub fn play(cfg: &Config, c: &Channel) -> Result<String, String> {
+/// チャンネルを再生する。起動したコマンドの説明と、起動したプロセスの番号を返す。
+pub fn play(cfg: &Config, c: &Channel) -> Result<(String, u32), String> {
     if c.is_info() {
         return Err("このチャンネルは再生できません (ID がありません)".into());
     }
@@ -181,8 +181,8 @@ pub fn play(cfg: &Config, c: &Channel) -> Result<String, String> {
         cmd.current_dir(dir);
     }
     // 終わるのを待たない
-    cmd.spawn().map_err(|e| format!("{} を起動できません: {}", exe.display(), e))?;
-    Ok(format!("{} {}", exe.display(), args.join(" ")))
+    let child = cmd.spawn().map_err(|e| format!("{} を起動できません: {}", exe.display(), e))?;
+    Ok((format!("{} {}", exe.display(), args.join(" ")), child.id()))
 }
 
 /// http(s) の URL だけをブラウザで開く。

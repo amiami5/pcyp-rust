@@ -300,6 +300,64 @@ struct PcStatus {
     agent: String,
 }
 
+/// 再生を始めてから、プレイヤーの窓が出るか PeerCast が受信し始めるまでを見張る長さ
+const PLAY_WATCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 見張りの終わり方
+#[derive(Clone, Copy)]
+enum PlayOutcome {
+    /// プレイヤーの窓が出た (かかった時間)
+    Opened(Duration),
+    /// PeerCast が受信し始めた (かかった時間)。窓は見つからなかった
+    Receiving(Duration),
+    /// 待っても窓が出ず、受信にもならなかった
+    TimedOut(Duration),
+    /// 窓が出ないままプレイヤーが終わり、PeerCast にも様子を聞けない
+    /// (開いているプレイヤーに URL を渡して終わる作りのプレイヤー、など)
+    Unknown,
+}
+
+/// 再生を始めたチャンネルの、プレイヤーと PeerCast の様子 (右下に出す)
+#[derive(Clone)]
+struct PlayWatch {
+    id: String,
+    name: String,
+    started: Instant,
+    /// getChannels の status。まだ PeerCast の一覧にないなら空
+    status: String,
+    /// PeerCast に問い合わせられなかったときの理由 (別の PC の PeerCast はパスワードがないと断る)
+    error: String,
+    /// 見張りが終わったら、その終わり方
+    result: Option<PlayOutcome>,
+}
+
+impl PlayWatch {
+    fn state_text(&self) -> &'static str {
+        match self.status.as_str() {
+            _ if !self.error.is_empty() => "プレイヤーが開くのを待っています",
+            "" => "PeerCast の接続を待っています",
+            "Searching" => "接続先を探しています",
+            "Connecting" => "つないでいます",
+            "Receiving" => "受信中",
+            "Idle" => "待機中",
+            "Error" => "エラー (やり直し中)",
+            _ => "接続中",
+        }
+    }
+}
+
+/// 見ているのが `started` の再生のままなら `f` で書き換える。新しい再生に替わっていたら false
+fn with_watch(watch: &Mutex<Option<PlayWatch>>, started: Instant, f: impl FnOnce(&mut PlayWatch)) -> bool {
+    let mut w = watch.lock().unwrap_or_else(|e| e.into_inner());
+    match w.as_mut() {
+        Some(w) if w.started == started => {
+            f(w);
+            true
+        }
+        _ => false,
+    }
+}
+
 #[derive(Default)]
 struct RelayState {
     channels: Vec<RelayChannel>,
@@ -347,6 +405,7 @@ pub struct App {
     relay: Arc<Mutex<RelayState>>,
     relay_last: Option<Instant>,
     pc_status: Arc<Mutex<PcStatus>>,
+    play_watch: Arc<Mutex<Option<PlayWatch>>>,
 
     was_minimized: bool,
     last_size: Option<[f32; 2]>,
@@ -421,6 +480,7 @@ impl App {
             relay: Arc::new(Mutex::new(RelayState::default())),
             relay_last: None,
             pc_status: Arc::new(Mutex::new(PcStatus::default())),
+            play_watch: Arc::new(Mutex::new(None)),
             was_minimized: false,
             last_size: None,
             closing: false,
@@ -617,9 +677,84 @@ impl App {
 
     fn play(&self, ch: &Channel) {
         match player::play(&self.cfg(), ch) {
-            Ok(cmd) => self.log(false, format!("再生: {}", cmd)),
+            Ok((cmd, pid)) => {
+                self.log(false, format!("再生: {}", cmd));
+                self.watch_play(ch, pid);
+            }
             Err(e) => self.log(true, e),
         }
+    }
+
+    /// プレイヤーの窓が出るか、PeerCast がそのチャンネルを受信し始めるまで様子を見る。
+    /// 窓は、起動したプロセスとその子孫のもの (ほかを起動して終わる作りのプレイヤーもあるので) を探す。
+    /// 新しく別の再生を始めたら、古い見張りはそこでやめる。
+    fn watch_play(&self, ch: &Channel, pid: u32) {
+        let started = Instant::now();
+        let id = ch.id.to_ascii_uppercase();
+        *self.play_watch.lock().unwrap_or_else(|e| e.into_inner()) = Some(PlayWatch {
+            id: id.clone(),
+            name: ch.name.clone(),
+            started,
+            status: String::new(),
+            error: String::new(),
+            result: None,
+        });
+        let (config, watch) = (self.config.clone(), self.play_watch.clone());
+        std::thread::spawn(move || {
+            let mut pids = HashSet::from([pid]);
+            // 別の PC の PeerCast は、パスワードがないと getChannels を断る (再生の URL はパスワードなしで通る)。
+            // 一度断られたら、あとはプレイヤーの窓だけを見る
+            let mut rpc_ok = true;
+            let mut last_rpc: Option<Instant> = None;
+            let outcome = loop {
+                let alive = win::track_process_tree(&mut pids);
+                if win::has_visible_window(&pids) {
+                    break PlayOutcome::Opened(started.elapsed());
+                }
+                if rpc_ok && last_rpc.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+                    last_rpc = Some(Instant::now());
+                    let pc = read(&config).peercast;
+                    let res = Rpc::new(&pc).channels();
+                    let status = match &res {
+                        Ok(cs) => cs.iter().find(|c| c.id == id).map(|c| c.status.clone()).unwrap_or_default(),
+                        Err(_) => String::new(),
+                    };
+                    rpc_ok = res.is_ok();
+                    let receiving = status == "Receiving";
+                    if !with_watch(&watch, started, |w| {
+                        w.status = status;
+                        w.error = res.err().unwrap_or_default();
+                    }) {
+                        return;
+                    }
+                    if receiving {
+                        break PlayOutcome::Receiving(started.elapsed());
+                    }
+                }
+                // プレイヤーが窓を出さずに終わったら、あとは PeerCast に聞くしかない
+                if !alive && !rpc_ok {
+                    break PlayOutcome::Unknown;
+                }
+                if started.elapsed() >= PLAY_WATCH_TIMEOUT {
+                    break PlayOutcome::TimedOut(started.elapsed());
+                }
+                win::request_repaint();
+                std::thread::sleep(Duration::from_millis(250));
+            };
+            if !with_watch(&watch, started, |w| w.result = Some(outcome)) {
+                return;
+            }
+            win::request_repaint();
+            // 結果をしばらく出してから消す
+            let keep = if let PlayOutcome::TimedOut(_) = outcome { 20 } else { 5 };
+            std::thread::sleep(Duration::from_secs(keep));
+            let mut w = watch.lock().unwrap_or_else(|e| e.into_inner());
+            if w.as_ref().is_some_and(|w| w.started == started) {
+                *w = None;
+            }
+            drop(w);
+            win::request_repaint();
+        });
     }
 
     fn open_url(&self, url: &str) {
@@ -891,8 +1026,52 @@ impl App {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).weak());
             ui.separator();
+            if self.play_status(ui) {
+                ui.separator();
+            }
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| self.status_items(ui, cfg, last_update, next, errors, last_log));
         });
+    }
+
+    /// 再生を始めたチャンネルの接続の進み具合。右から左に並べる中で呼ぶ。何か出したら true
+    fn play_status(&mut self, ui: &mut egui::Ui) -> bool {
+        let Some(w) = self.play_watch.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return false;
+        };
+        let name: String = if w.name.chars().count() > 20 { w.name.chars().take(19).chain(Some('…')).collect() } else { w.name.clone() };
+        let (text, color) = match w.result {
+            Some(PlayOutcome::Opened(t)) => {
+                (format!("✔ {} プレイヤーが開きました ({}秒)", name, t.as_secs()), Some(Color32::from_rgb(40, 170, 70)))
+            }
+            Some(PlayOutcome::Receiving(t)) => (format!("✔ {} 受信中 ({}秒)", name, t.as_secs()), Some(Color32::from_rgb(40, 170, 70))),
+            Some(PlayOutcome::TimedOut(t)) => {
+                (format!("✖ {} {}秒たってもプレイヤーが開きません", name, t.as_secs()), Some(Color32::from_rgb(220, 60, 60)))
+            }
+            Some(PlayOutcome::Unknown) => (format!("▶ {} プレイヤーを起動しました", name), None),
+            None => (format!("{} {} {}秒", name, w.state_text(), w.started.elapsed().as_secs()), None),
+        };
+        let t = RichText::new(text);
+        let t = match color {
+            Some(c) => t.color(c),
+            None => t,
+        };
+        let mut hover = format!("{}\nID: {}", w.name, w.id);
+        if !w.status.is_empty() {
+            hover.push_str(&format!("\nPeerCast の状態: {}", w.status));
+        }
+        if !w.error.is_empty() {
+            hover.push_str(&format!("\nPeerCast に接続の様子を聞けませんでした: {}", w.error));
+        }
+        hover.push_str("\nクリックで接続中のチャンネルを表示");
+        // 右から並べるので、文字を先に置くとくるくるはその左に出る
+        if ui.add(egui::Label::new(t).sense(Sense::click())).on_hover_text(hover).clicked() {
+            self.show_relay = true;
+            self.load_relays();
+        }
+        if w.result.is_none() {
+            ui.add(egui::Spinner::new());
+        }
+        true
     }
 
     /// 起動時の知らせ (設定のファイルを読めなかった、など) を黄色の帯で出す

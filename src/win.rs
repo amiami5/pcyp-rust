@@ -3,6 +3,7 @@
 use crate::chandir::Channel;
 use crate::config::Config;
 use crate::worker::{Command, SharedRef, lock};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -154,6 +155,67 @@ mod imp {
             None => false,
         }
     }
+
+    /// `pids` のプロセスの子孫を探して `pids` に足す。`pids` のどれかが今も動いていれば true。
+    /// 終わったプロセスの子も、親の番号は残るので見つけられる。
+    pub fn track_process_tree(pids: &mut HashSet<u32>) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+        };
+        let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snap == INVALID_HANDLE_VALUE {
+            return true;
+        }
+        let mut procs = Vec::new();
+        let mut e: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = unsafe { Process32FirstW(snap, &mut e) } != 0;
+        while ok {
+            procs.push((e.th32ProcessID, e.th32ParentProcessID));
+            ok = unsafe { Process32NextW(snap, &mut e) } != 0;
+        }
+        unsafe { CloseHandle(snap) };
+        // 孫、ひ孫と、増えなくなるまで足す
+        loop {
+            let before = pids.len();
+            for &(pid, parent) in &procs {
+                if pids.contains(&parent) {
+                    pids.insert(pid);
+                }
+            }
+            if pids.len() == before {
+                break;
+            }
+        }
+        procs.iter().any(|(pid, _)| pids.contains(pid))
+    }
+
+    /// `pids` のどれかのプロセスが、見えている一番上の窓 (ある程度の大きさがあるもの) を持っているか。
+    pub fn has_visible_window(pids: &HashSet<u32>) -> bool {
+        use windows_sys::Win32::Foundation::{HWND, LPARAM};
+        struct Search<'a> {
+            pids: &'a HashSet<u32>,
+            found: bool,
+        }
+        unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> i32 {
+            let s = unsafe { &mut *(lp as *mut Search) };
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(h, &mut pid) };
+            if !s.pids.contains(&pid) || unsafe { IsWindowVisible(h) } == 0 || !unsafe { GetWindow(h, GW_OWNER) }.is_null() {
+                return 1;
+            }
+            let mut r = RECT::default();
+            if unsafe { GetWindowRect(h, &mut r) } != 0 && r.right - r.left >= 50 && r.bottom - r.top >= 50 {
+                s.found = true;
+                return 0;
+            }
+            1
+        }
+        let mut s = Search { pids, found: false };
+        unsafe { EnumWindows(Some(each), &mut s as *mut Search as LPARAM) };
+        s.found
+    }
 }
 
 #[cfg(not(windows))]
@@ -179,10 +241,17 @@ mod imp {
     pub fn rect_is_on_screen(_r: [i32; 4]) -> bool {
         false
     }
+    pub fn track_process_tree(_pids: &mut HashSet<u32>) -> bool {
+        true
+    }
+    pub fn has_visible_window(_pids: &HashSet<u32>) -> bool {
+        false
+    }
 }
 
 pub use imp::{
-    apply_exe_icon, hide_window, is_window_visible, post_close, rect_is_on_screen, set_window_rect, show_window, window_rect,
+    apply_exe_icon, has_visible_window, hide_window, is_window_visible, post_close, rect_is_on_screen, set_window_rect,
+    show_window, track_process_tree, window_rect,
 };
 
 /// 画面の中にあるかを調べるときの、タイトルバーのあたりの高さ (ピクセル)
@@ -236,7 +305,7 @@ pub fn notify_channels(chans: &[Channel], config: Arc<RwLock<Config>>, shared: S
                 let r = crate::player::play(&cfg, &ch);
                 let mut s = lock(&shared);
                 match r {
-                    Ok(cmd) => s.log(false, format!("再生: {}", cmd)),
+                    Ok((cmd, _)) => s.log(false, format!("再生: {}", cmd)),
                     Err(e) => s.log(true, e),
                 }
                 drop(s);
@@ -365,5 +434,29 @@ mod tests {
     fn broken_size_is_rejected() {
         assert!(!visible_enough([100, 100, 110, 110], WORK));
         assert!(!visible_enough([100, 100, 50, 700], WORK));
+    }
+
+    /// 実際に窓を開くので、手で `cargo test -- --ignored finds_player_window` として動かす
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn finds_player_window() {
+        use std::collections::HashSet;
+        use std::time::{Duration, Instant};
+        // cmd を挟み、子孫の窓も見つかるかを見る
+        let mut child = std::process::Command::new("cmd").args(["/c", "charmap.exe"]).spawn().unwrap();
+        let mut pids = HashSet::from([child.id()]);
+        let t = Instant::now();
+        let mut found = false;
+        while t.elapsed() < Duration::from_secs(10) && !found {
+            super::track_process_tree(&mut pids);
+            found = super::has_visible_window(&pids);
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        for &p in &pids {
+            let _ = std::process::Command::new("taskkill").args(["/f", "/pid", &p.to_string()]).output();
+        }
+        let _ = child.wait();
+        assert!(found, "窓が見つからない: {:?}", pids);
     }
 }
