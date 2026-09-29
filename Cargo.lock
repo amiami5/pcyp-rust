@@ -2234,6 +2234,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "skrifa",
  "tauri-winrt-notification",
  "tray-icon",
  "ureq",

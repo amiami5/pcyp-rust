@@ -33,14 +33,14 @@ fn setup_fonts(ctx: &egui::Context, custom: &str) -> bool {
     let Some(data) = regular.iter().find_map(|p| std::fs::read(p).ok()) else {
         return false;
     };
-    fonts.font_data.insert("jp".into(), Arc::new(egui::FontData::from_owned(data)));
+    fonts.font_data.insert("jp".into(), Arc::new(jp_font(data)));
     let default_prop = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
     fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "jp".into());
     fonts.families.entry(egui::FontFamily::Monospace).or_default().push("jp".into());
 
     let has_bold = match bold.iter().find_map(|p| std::fs::read(p).ok()) {
         Some(data) => {
-            fonts.font_data.insert("jp_bold".into(), Arc::new(egui::FontData::from_owned(data)));
+            fonts.font_data.insert("jp_bold".into(), Arc::new(jp_font(data)));
             let mut fam = vec!["jp_bold".to_string(), "jp".to_string()];
             fam.extend(default_prop);
             fonts.families.insert(egui::FontFamily::Name(app::BOLD.into()), fam);
@@ -50,6 +50,33 @@ fn setup_fonts(ctx: &egui::Context, custom: &str) -> bool {
     };
     ctx.set_fonts(fonts);
     has_bold
+}
+
+/// 日本語のフォントを、字の上下の真ん中が行の真ん中に来るようにずらして読み込む。
+/// egui は足りない字を補うフォント (⟳ ⚙ 📋 などの絵文字) を行の真ん中に置くが、
+/// 日本語のフォントは行の上寄りに字があるので、そのままだと絵文字より上に見える。
+/// ずらす量は字の大きさに比例させるので、文字サイズやフォントを変えてもそろう。
+fn jp_font(data: Vec<u8>) -> egui::FontData {
+    use skrifa::MetadataProvider;
+    let mut font = egui::FontData::from_owned(data);
+    let Ok(f) = skrifa::FontRef::from_index(&font.font, 0) else {
+        return font;
+    };
+    // egui と同じ取り方をした行の寸法 (上向きが正、字の単位)
+    let m = f.metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
+    let em = m.units_per_em as f32;
+    // 字の上下の真ん中は、漢字の外枠で測る
+    let gm = f.glyph_metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
+    let Some(b) = f.charmap().map('国').and_then(|g| gm.bounds(g)) else {
+        return font;
+    };
+    // 行の上端から測った、字の真ん中と行の真ん中
+    let glyph_mid = m.ascent - (b.y_min + b.y_max) / 2.0;
+    let row_mid = (m.ascent - m.descent + m.leading) / 2.0;
+    if em > 0.0 {
+        font.tweak.y_offset_factor = (row_mid - glyph_mid) / em;
+    }
+    font
 }
 
 /// 二つ目の起動なら false。
