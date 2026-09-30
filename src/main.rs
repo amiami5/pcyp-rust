@@ -9,6 +9,7 @@ mod history;
 mod icon;
 mod peercast;
 mod player;
+mod update;
 mod win;
 mod worker;
 

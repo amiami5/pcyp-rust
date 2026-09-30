@@ -225,6 +225,21 @@ impl Default for HistoryConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
+pub struct UpdateCheckConfig {
+    /// 起動時と 1 日ごとに、GitHub Releases に新しい版がないか確かめる
+    pub enabled: bool,
+    /// 「この版は知らせない」を選んだ版のタグ
+    pub skip_version: String,
+}
+
+impl Default for UpdateCheckConfig {
+    fn default() -> Self {
+        UpdateCheckConfig { enabled: true, skip_version: String::new() }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Columns {
     pub name: bool,
     pub summary: bool,
@@ -326,6 +341,7 @@ pub struct Config {
     pub tray: TrayConfig,
     pub view: ViewConfig,
     pub history: HistoryConfig,
+    pub update_check: UpdateCheckConfig,
 }
 
 impl Default for Config {
@@ -343,6 +359,7 @@ impl Default for Config {
             tray: TrayConfig::default(),
             view: ViewConfig::default(),
             history: HistoryConfig::default(),
+            update_check: UpdateCheckConfig::default(),
         }
     }
 }

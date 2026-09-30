@@ -6,6 +6,7 @@ use crate::filter::{self, CompiledFilter, FIELDS, Filter, Filters, Search};
 use crate::history;
 use crate::peercast::{self, RelayChannel, Rpc};
 use crate::player;
+use crate::update::{self, UpdateRef};
 use crate::win;
 use crate::worker::{Command, FetchState, SharedRef, lock};
 use eframe::egui::{self, Align, Color32, FontFamily, Key, Layout, RichText, Sense};
@@ -440,6 +441,8 @@ pub struct App {
     relay_last: Option<Instant>,
     pc_status: Arc<Mutex<PcStatus>>,
     play_watch: Arc<Mutex<Option<PlayWatch>>>,
+    /// 新しい版を確かめた結果
+    update: UpdateRef,
 
     was_minimized: bool,
     last_size: Option<[f32; 2]>,
@@ -518,6 +521,7 @@ impl App {
             relay_last: None,
             pc_status: Arc::new(Mutex::new(PcStatus::default())),
             play_watch: Arc::new(Mutex::new(None)),
+            update: UpdateRef::default(),
             was_minimized: false,
             last_size: None,
             closing: false,
@@ -805,6 +809,24 @@ impl App {
         if let Err(e) = player::open_url(&self.cfg().browser, url) {
             self.log(true, e);
         }
+    }
+
+    /// GitHub Releases に新しい版がないか、別のスレッドで確かめる。
+    /// 手で確かめたときは、新しい版がなくてもログに結果を出す。
+    fn check_update(&self, ctx: &egui::Context, manual: bool) {
+        let shared = self.shared.clone();
+        let ctx = ctx.clone();
+        update::spawn_check(&self.update, move |result| {
+            let mut s = lock(&shared);
+            match result {
+                Ok(Some(r)) if r.is_newer() => s.log(false, format!("新しい版 {} が出ています", r.tag)),
+                Ok(_) if manual => s.log(false, concat!("今の版 (v", env!("CARGO_PKG_VERSION"), ") が最新です")),
+                Ok(_) => {}
+                Err(e) => s.log(true, format!("新しい版があるか確かめられませんでした: {}", e)),
+            }
+            drop(s);
+            ctx.request_repaint();
+        });
     }
 
     fn save_filters(&mut self, filters: Vec<Filter>) {
@@ -1165,6 +1187,53 @@ impl App {
         ui.add_space(2.0);
         if close {
             self.notices.clear();
+        }
+    }
+
+    /// 新しい版が出ていれば、青い帯で知らせる
+    fn update_banner(&mut self, ui: &mut egui::Ui, cfg: &Config) {
+        let release = {
+            let u = update::lock(&self.update);
+            match &u.latest {
+                Some(r) if cfg.update_check.enabled && !u.dismissed && r.is_newer() && r.tag != cfg.update_check.skip_version => r.clone(),
+                _ => return,
+            }
+        };
+        let (fill, text) = if ui.visuals().dark_mode {
+            (Color32::from_rgb(25, 55, 95), Color32::from_rgb(200, 225, 255))
+        } else {
+            (Color32::from_rgb(215, 232, 255), Color32::from_rgb(10, 50, 110))
+        };
+        let (mut close, mut skip) = (false, false);
+        egui::Frame::new().fill(fill).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("閉じる").on_hover_text("次の起動でまた知らせます").clicked() {
+                    close = true;
+                }
+                if ui.button("この版は知らせない").clicked() {
+                    skip = true;
+                }
+                if ui.button("リリースのページ").on_hover_text(&release.page_url).clicked() {
+                    self.open_url(&release.page_url);
+                }
+                if !release.zip_url.is_empty() && ui.button("zip をダウンロード").on_hover_text(&release.zip_url).clicked() {
+                    self.open_url(&release.zip_url);
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    let msg = format!("⬆ 新しい版 {} が出ています (今は v{})", release.tag, env!("CARGO_PKG_VERSION"));
+                    ui.add(egui::Label::new(RichText::new(msg).color(text)).truncate());
+                });
+            });
+        });
+        ui.add_space(2.0);
+        if close {
+            update::lock(&self.update).dismissed = true;
+        }
+        if skip {
+            let mut new = self.cfg();
+            new.update_check.skip_version = release.tag;
+            self.apply_config(ui.ctx(), new);
         }
     }
 
@@ -1831,6 +1900,8 @@ impl App {
         let mut open = true;
         let mut result: Option<bool> = None; // Some(true) で閉じる、Some(false) で適用だけ
         let mut cancel = false;
+        let mut check_now = false;
+        let update_state = self.update.clone();
         sub_window(ctx, &mut self.subs, "settings", "設定", [780.0, 760.0], &mut open, |ui| {
             ui.horizontal(|ui| {
                 for (t, label) in [
@@ -1851,7 +1922,7 @@ impl App {
                 SettingsTab::Update => settings_update(ui, &mut dlg.cfg),
                 SettingsTab::PeerCast => settings_peercast(ui, &mut dlg.cfg, &dlg.test),
                 SettingsTab::Player => settings_player(ui, &mut dlg.cfg),
-                SettingsTab::Notify => settings_notify(ui, &mut dlg.cfg),
+                SettingsTab::Notify => check_now = settings_notify(ui, &mut dlg.cfg, &update_state),
                 SettingsTab::View => settings_view(ui, &mut dlg.cfg),
             });
             ui.separator();
@@ -1873,12 +1944,19 @@ impl App {
         if cancel {
             open = false;
         }
+        if check_now {
+            self.check_update(ctx, true);
+        }
         if let Some(close) = result {
             let dlg = self.settings.as_mut().unwrap();
             match validate(&mut dlg.cfg) {
                 Ok(()) => {
                     dlg.error.clear();
-                    let new = dlg.cfg.clone();
+                    let mut new = dlg.cfg.clone();
+                    // 「この版は知らせない」は帯で選ぶので、設定の画面を開いた時点の古い値で上書きしない (「また知らせる」で消したときは消す)
+                    if !new.update_check.skip_version.is_empty() {
+                        new.update_check.skip_version = self.cfg().update_check.skip_version;
+                    }
                     self.apply_config(ctx, new);
                     if close {
                         open = false;
@@ -2450,7 +2528,8 @@ fn settings_player(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.label(RichText::new("pcyplite 形式の <stream/> <channelname/> <contact/> も使えます。").weak());
 }
 
-fn settings_notify(ui: &mut egui::Ui, cfg: &mut Config) {
+/// 「今すぐ確かめる」を押したら true
+fn settings_notify(ui: &mut egui::Ui, cfg: &mut Config, update_state: &UpdateRef) -> bool {
     ui.heading("通知");
     ui.checkbox(&mut cfg.notify.enabled, "お気に入りのチャンネルが始まったら通知する");
     ui.checkbox(&mut cfg.notify.on_first_fetch, "起動して最初の取得でも通知する");
@@ -2463,6 +2542,36 @@ fn settings_notify(ui: &mut egui::Ui, cfg: &mut Config) {
         ui.checkbox(&mut cfg.tray.close_to_tray, "閉じるボタンでタスクトレイに格納する (終了はトレイのメニューから)");
         ui.checkbox(&mut cfg.tray.start_minimized, "起動時にタスクトレイに格納する");
     });
+    ui.separator();
+    ui.heading("新しい版");
+    ui.checkbox(&mut cfg.update_check.enabled, "新しい版が出たら知らせる (起動時と 1 日ごとに GitHub Releases を確かめる)");
+    let u = update::lock(update_state);
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        clicked = ui.add_enabled(!u.checking, egui::Button::new("今すぐ確かめる")).clicked();
+        let status = if u.checking {
+            "確かめています…".to_string()
+        } else if !u.error.is_empty() {
+            format!("{} 確かめられませんでした: {}", u.checked_at, u.error)
+        } else {
+            match &u.latest {
+                Some(r) if r.is_newer() => format!("{} 新しい版 {} が出ています", u.checked_at, r.tag),
+                _ if u.last_check.is_some() => format!("{} 今の版が最新です", u.checked_at),
+                _ => String::new(),
+            }
+        };
+        ui.label(status);
+    });
+    if !cfg.update_check.skip_version.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(format!("知らせない版: {}", cfg.update_check.skip_version));
+            if ui.button("また知らせる").clicked() {
+                cfg.update_check.skip_version.clear();
+            }
+        });
+    }
+    ui.label(RichText::new(format!("今の版は v{} です。確かめるだけで、ダウンロードや入れ替えはしません。", env!("CARGO_PKG_VERSION"))).weak());
+    clicked
 }
 
 fn settings_view(ui: &mut egui::Ui, cfg: &mut Config) {
@@ -2664,6 +2773,9 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let cfg = self.cfg();
         self.window_state(ctx, &cfg);
+        if cfg.update_check.enabled && update::lock(&self.update).due() {
+            self.check_update(ctx, false);
+        }
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 
@@ -2677,6 +2789,7 @@ impl eframe::App for App {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.add_space(2.0);
             self.notice_banner(ui);
+            self.update_banner(ui, &cfg);
             self.toolbar(ui, &cfg);
             self.tab_bar(ui, &cfg);
         });
