@@ -591,12 +591,17 @@ impl App {
                     let pc = read(&config).peercast;
                     let running = peercast::is_running(&pc);
                     let agent = if running { Rpc::new(&pc).version_info().map(|v| v.agent).unwrap_or_default() } else { String::new() };
-                    {
+                    // ステータスバーの表示が変わるときだけ描き直す
+                    let changed = {
                         let mut s = status.lock().unwrap_or_else(|e| e.into_inner());
+                        let changed = s.running != running || s.agent != agent;
                         s.running = running;
                         s.agent = agent;
+                        changed
+                    };
+                    if changed {
+                        ctx.request_repaint();
                     }
-                    ctx.request_repaint();
                     std::thread::sleep(Duration::from_secs(10));
                 }
             })
