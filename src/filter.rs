@@ -84,6 +84,111 @@ impl Filter {
     }
 }
 
+/// チャンネルからフィルターを作るときの雛形。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Template {
+    /// 名前がちょうど同じ
+    Exact,
+    /// 名前 (括弧の中を除いた部分) を含む
+    Contains,
+    /// コンタクト URL が同じ
+    Contact,
+    /// 名前が同じか、コンタクト URL が同じ
+    NameOrContact,
+}
+
+impl Template {
+    pub const ALL: [Template; 4] = [Template::Contains, Template::Exact, Template::Contact, Template::NameOrContact];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Template::Exact => "名前がちょうど同じ",
+            Template::Contains => "名前を含む",
+            Template::Contact => "コンタクト URL が同じ",
+            Template::NameOrContact => "名前か URL が同じ",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Template::Exact => "この名前のチャンネルだけに当てます",
+            Template::Contains => "【】や () の中を除いた名前を含むチャンネルに当てます。名前の後ろに回数や告知を付ける配信者向け",
+            Template::Contact => "コンタクト URL (掲示板など) が同じチャンネルに当てます。名前をよく変える配信者向け",
+            Template::NameOrContact => "名前か、コンタクト URL のどちらかが同じなら当てます",
+        }
+    }
+
+    /// このチャンネルでこの雛形が使えるか (コンタクト URL がなければ URL の雛形は使えない)
+    pub fn usable(self, c: &Channel) -> bool {
+        match self {
+            Template::Contact | Template::NameOrContact => !contact_key(&c.url).is_empty(),
+            _ => !c.name.trim().is_empty(),
+        }
+    }
+
+    /// 雛形の検索条件を作る。
+    pub fn search(self, c: &Channel) -> Search {
+        let exact = format!("^{}$", regex::escape(&c.name));
+        let url = format!("^https?://{}/?$", regex::escape(contact_key(&c.url)));
+        let (search, fields) = match self {
+            Template::Exact => (exact, vec!["name"]),
+            Template::Contains => (regex::escape(name_core(&c.name)), vec!["name"]),
+            Template::Contact => (url, vec!["url"]),
+            Template::NameOrContact => (format!("{}|{}", exact, url), vec!["name", "url"]),
+        };
+        Search { enabled: true, search, fields: fields.into_iter().map(String::from).collect() }
+    }
+
+    /// 雛形から新しいフィルターを作る (お気に入り)。
+    pub fn filter(self, c: &Channel) -> Filter {
+        Filter { name: name_core(&c.name).to_string(), base_search: self.search(c), ..Default::default() }
+    }
+}
+
+/// 名前から、【】 () [] などで囲んだ部分を除いた、はじめのまとまり。
+/// 「〇〇の雑談【初見歓迎】」なら「〇〇の雑談」。何も残らなければ名前をそのまま返す。
+pub fn name_core(name: &str) -> &str {
+    const OPEN: &[char] = &['(', '（', '[', '［', '【', '〔', '「', '『', '<', '＜', '《', '〈'];
+    let name = name.trim();
+    let core = match name.find(OPEN) {
+        Some(0) => {
+            // 先頭が括弧なら、閉じたあとの部分を使う
+            const CLOSE: &[char] = &[')', '）', ']', '］', '】', '〕', '」', '』', '>', '＞', '》', '〉'];
+            match name.find(CLOSE) {
+                Some(i) => {
+                    let rest = &name[i..];
+                    let rest = rest[rest.chars().next().map_or(0, char::len_utf8)..].trim_start();
+                    rest.find(OPEN).map_or(rest, |j| &rest[..j])
+                }
+                None => name,
+            }
+        }
+        Some(i) => &name[..i],
+        None => name,
+    };
+    let core = core.trim();
+    if core.is_empty() { name } else { core }
+}
+
+/// コンタクト URL の比べる部分 (http(s):// と末尾の / を除く)。
+fn contact_key(url: &str) -> &str {
+    let u = url.trim();
+    let u = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).unwrap_or("");
+    u.trim_end_matches('/')
+}
+
+/// 1 つのフィルターがどのチャンネルに当たるかを調べるためのもの (有効かどうかは見ない)。
+pub fn compile_one(f: &Filter) -> Result<CompiledFilter, String> {
+    if f.base_search.search.is_empty() {
+        return Err("条件が空です".into());
+    }
+    let (mut c, mut e) = compile(std::slice::from_ref(&Filter { enabled: true, ..f.clone() }));
+    match c.pop() {
+        Some(c) => Ok(c),
+        None => Err(e.pop().unwrap_or_default()),
+    }
+}
+
 /// 保存するファイルの形。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(transparent)]
@@ -263,5 +368,36 @@ mod tests {
         let f: Filters = serde_json::from_str(json).unwrap();
         assert_eq!(f.0[0].color, [255, 200, 0]);
         assert!(f.0[0].notify);
+    }
+
+    #[test]
+    fn name_core_strips_brackets() {
+        assert_eq!(name_core("〇〇の雑談【初見歓迎】"), "〇〇の雑談");
+        assert_eq!(name_core("abc (test)"), "abc");
+        assert_eq!(name_core("【告知】ゲーム実況(PS5)"), "ゲーム実況");
+        assert_eq!(name_core("【だけ】"), "【だけ】");
+        assert_eq!(name_core("そのまま"), "そのまま");
+    }
+
+    #[test]
+    fn templates_match_the_source() {
+        let c = Channel { name: "a.b【雑談】".into(), url: "https://example.com/bbs/".into(), ..Default::default() };
+        for t in Template::ALL {
+            assert!(t.usable(&c));
+            let f = compile_one(&t.filter(&c)).unwrap();
+            assert!(f.is_match(&c, ""), "{:?}", t);
+        }
+        let other = |name: &str, url: &str| Channel { name: name.into(), url: url.into(), ..Default::default() };
+        let m = |t: Template, o: &Channel| compile_one(&t.filter(&c)).unwrap().is_match(o, "");
+        assert!(m(Template::Contains, &other("a.b 2 回目", "")));
+        assert!(!m(Template::Contains, &other("axb", "")));
+        assert!(!m(Template::Exact, &other("a.b", "")));
+        assert!(m(Template::Contact, &other("別の名前", "http://example.com/bbs")));
+        assert!(!m(Template::Contact, &other("別の名前", "http://example.com/bbs/2")));
+        assert!(m(Template::NameOrContact, &other("a.b【雑談】", "")));
+        assert!(m(Template::NameOrContact, &other("x", "https://example.com/bbs/")));
+        let no_url = Channel { name: "x".into(), ..Default::default() };
+        assert!(!Template::Contact.usable(&no_url));
+        assert!(compile_one(&Filter::default()).is_err());
     }
 }
