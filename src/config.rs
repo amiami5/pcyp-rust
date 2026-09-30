@@ -285,6 +285,8 @@ pub struct ViewConfig {
     pub scroll_rows: u32,
     /// 一覧で省略された文字に、カーソルを合わせたとき全文を出す
     pub show_tooltips: bool,
+    /// ステータスバーに次の自動更新までの残り時間を出す
+    pub show_countdown: bool,
     /// 一覧の列の幅 (境目の線を動かして変えたもの)。列の名前ごと
     pub column_widths: std::collections::BTreeMap<String, f32>,
     /// 閉じたときの窓の位置と大きさ (スクリーンのピクセルで [左, 上, 右, 下])。次の起動でここに開く
@@ -313,6 +315,7 @@ impl Default for ViewConfig {
             hide_ignored_tab: true,
             scroll_rows: 2,
             show_tooltips: false,
+            show_countdown: true,
             column_widths: Default::default(),
             window_rect: None,
             sub_windows: Default::default(),

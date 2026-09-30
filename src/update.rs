@@ -124,13 +124,18 @@ pub struct UpdateState {
 impl UpdateState {
     /// 自動で確かめる時期か
     pub fn due(&self) -> bool {
+        self.until_due() == Some(Duration::ZERO)
+    }
+
+    /// 次に自動で確かめるまでの時間。確かめている最中なら None (終わったら描き直しが来る)
+    pub fn until_due(&self) -> Option<Duration> {
         if self.checking {
-            return false;
+            return None;
         }
-        match self.last_check {
-            None => true,
-            Some(t) => t.elapsed() >= if self.error.is_empty() { CHECK_INTERVAL } else { RETRY_INTERVAL },
-        }
+        Some(match self.last_check {
+            None => Duration::ZERO,
+            Some(t) => (if self.error.is_empty() { CHECK_INTERVAL } else { RETRY_INTERVAL }).saturating_sub(t.elapsed()),
+        })
     }
 }
 

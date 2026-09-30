@@ -1276,7 +1276,7 @@ impl App {
             if let Some(t) = last_update {
                 ui.label(format!("更新 {}", t));
             }
-            if let Some(n) = next.filter(|_| cfg.auto_update) {
+            if let Some(n) = next.filter(|_| cfg.auto_update && cfg.view.show_countdown) {
                 ui.label(format!("次 {}:{:02}", n / 60, n % 60));
             }
             if errors > 0 {
@@ -2485,6 +2485,9 @@ fn settings_yp(ui: &mut egui::Ui, cfg: &mut Config) -> bool {
 fn settings_update(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.checkbox(&mut cfg.fetch_on_start, "起動したら一覧を取得する");
     ui.checkbox(&mut cfg.auto_update, "自動で更新する");
+    ui.add_enabled_ui(cfg.auto_update, |ui| {
+        ui.indent("countdown", |ui| ui.checkbox(&mut cfg.view.show_countdown, "次の更新までの残り時間をステータスバーに出す"));
+    });
     ui.horizontal(|ui| {
         ui.label("更新の間隔");
         // 「分」は枠の外に書く (数字だけ入れればよいとわかるように)
@@ -3041,10 +3044,15 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let cfg = self.cfg();
         self.window_state(ctx, &cfg);
-        if cfg.update_check.enabled && update::lock(&self.update).due() {
-            self.check_update(ctx, false);
+        if cfg.update_check.enabled {
+            if update::lock(&self.update).due() {
+                self.check_update(ctx, false);
+            }
+            // 次に確かめる時刻に起きる (確かめ終わったときは check_update が描き直しを頼む)
+            if let Some(d) = update::lock(&self.update).until_due() {
+                ctx.request_repaint_after(d);
+            }
         }
-        ctx.request_repaint_after(Duration::from_millis(500));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -3100,7 +3108,10 @@ impl eframe::App for App {
             self.apply_config(&ctx, new);
         }
 
-        // 次の自動更新までの表示のため
-        ctx.request_repaint_after(Duration::from_secs(1));
+        // 残り時間を出しているときだけ 1 秒ごとに描き直す。
+        // それ以外 (取得の結果、NEW の印、再生の様子など) は、変わったときにそれぞれのスレッドが描き直しを頼む
+        if cfg.auto_update && cfg.view.show_countdown && lock(&self.shared).next_auto.is_some() {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
     }
 }
