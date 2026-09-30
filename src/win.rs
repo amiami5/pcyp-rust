@@ -279,6 +279,12 @@ pub fn now_hms() -> String {
     format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
+/// 履歴に残す今の日時 (`2026-09-30 21:05`)。
+pub fn now_ymdhm() -> String {
+    let [y, mo, d, h, mi, _] = imp::local_time();
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", y, mo, d, h, mi)
+}
+
 /// ファイル名に使う今の日時 (`20260925-001637`)。
 pub fn now_stamp() -> String {
     let [y, mo, d, h, mi, s] = imp::local_time();
@@ -303,12 +309,16 @@ pub fn notify_channels(chans: &[Channel], config: Arc<RwLock<Config>>, shared: S
             if action.as_deref() == Some("play") {
                 let cfg = config.read().unwrap_or_else(|e| e.into_inner()).clone();
                 let r = crate::player::play(&cfg, &ch);
+                let ok = r.is_ok();
                 let mut s = lock(&shared);
                 match r {
                     Ok((cmd, _)) => s.log(false, format!("再生: {}", cmd)),
                     Err(e) => s.log(true, e),
                 }
                 drop(s);
+                if ok {
+                    crate::history::record_play(&shared, &cfg, &ch);
+                }
                 request_repaint();
             } else {
                 show_window();

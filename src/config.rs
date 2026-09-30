@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 pub const APP_NAME: &str = "pcyp-rust";
 pub const CONFIG_FILE: &str = "pcyp-rust.json";
 pub const FILTER_FILE: &str = "channelFilters.json";
+pub const HISTORY_FILE: &str = "history.json";
 
 /// 自動更新の間隔の最小 (分)。YP サーバーに負担をかけないため。
 pub const MIN_AUTO_INTERVAL_MIN: u32 = 2;
@@ -13,6 +14,10 @@ pub const MIN_AUTO_INTERVAL_MIN: u32 = 2;
 pub const DEFAULT_AUTO_INTERVAL_MIN: u32 = 5;
 /// 手動更新は前回から何秒空けるか。
 pub const MANUAL_INTERVAL_SEC: u64 = 30;
+/// 新しく始まったチャンネルに NEW の印を出す長さの初期値 (分)。
+pub const DEFAULT_NEW_MARK_MIN: u32 = 15;
+/// 再生の履歴に残す件数の初期値。
+pub const DEFAULT_HISTORY_MAX: u32 = 300;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -205,6 +210,21 @@ impl Default for TrayConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
+pub struct HistoryConfig {
+    /// 再生したチャンネルを履歴に残す
+    pub enabled: bool,
+    /// 残す件数 (チャンネル名ごとに 1 件)
+    pub max: u32,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        HistoryConfig { enabled: true, max: DEFAULT_HISTORY_MAX }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Columns {
     pub name: bool,
     pub summary: bool,
@@ -298,11 +318,14 @@ pub struct Config {
     pub auto_update: bool,
     pub update_interval_min: u32,
     pub fetch_on_start: bool,
+    /// 新しく始まったチャンネルに NEW の印を出す長さ (分)。0 なら次の更新まで
+    pub new_mark_min: u32,
     /// URL を開くブラウザ。空なら既定のブラウザ。
     pub browser: String,
     pub notify: NotifyConfig,
     pub tray: TrayConfig,
     pub view: ViewConfig,
+    pub history: HistoryConfig,
 }
 
 impl Default for Config {
@@ -314,10 +337,12 @@ impl Default for Config {
             auto_update: true,
             update_interval_min: DEFAULT_AUTO_INTERVAL_MIN,
             fetch_on_start: true,
+            new_mark_min: DEFAULT_NEW_MARK_MIN,
             browser: String::new(),
             notify: NotifyConfig::default(),
             tray: TrayConfig::default(),
             view: ViewConfig::default(),
+            history: HistoryConfig::default(),
         }
     }
 }
