@@ -270,6 +270,8 @@ enum Action {
     RemoveFilter(usize),
     /// フィルターの画面を開いて、この番号のフィルターを選ぶ
     EditFilter(usize),
+    /// フィルターの画面を開いて、この行のチャンネルをもとにした新しいフィルターを足す
+    NewFilterFrom(usize),
     Bump(String),
     Stop(String),
     /// 履歴からこの名前のものを消す
@@ -299,6 +301,26 @@ struct FilterDlg {
     sel: usize,
     /// 次の描画で、選んだフィルターが見えるまで一覧をスクロールする
     scroll_to_sel: bool,
+    /// 行の右クリックから作ったフィルターの番号と、もとにしたチャンネル (雛形を選び直すのに使う)
+    source: Option<(usize, Channel)>,
+    /// 選んだ雛形 (source があるときだけ意味がある)
+    template: filter::Template,
+}
+
+impl FilterDlg {
+    fn new(filters: Vec<Filter>, sel: usize, scroll_to_sel: bool) -> FilterDlg {
+        FilterDlg { filters, sel, scroll_to_sel, source: None, template: filter::Template::Contains }
+    }
+
+    /// チャンネルをもとにした新しいフィルターを末尾に足して選ぶ (保存は OK / 適用のとき)。
+    fn add_from(&mut self, c: &Channel) {
+        let t = filter::Template::Contains;
+        self.filters.push(t.filter(c));
+        self.sel = self.filters.len() - 1;
+        self.scroll_to_sel = true;
+        self.source = Some((self.sel, c.clone()));
+        self.template = t;
+    }
 }
 
 #[derive(Default)]
@@ -882,8 +904,12 @@ impl App {
                         dlg.sel = i.min(dlg.filters.len().saturating_sub(1));
                         dlg.scroll_to_sel = true;
                     }
-                    None => self.filter_dlg = Some(FilterDlg { filters: read(&self.filters), sel: i, scroll_to_sel: true }),
+                    None => self.filter_dlg = Some(FilterDlg::new(read(&self.filters), i, true)),
                 },
+                Action::NewFilterFrom(i) => {
+                    let c = self.rows[i].ch.clone();
+                    self.filter_dlg.get_or_insert_with(|| FilterDlg::new(read(&self.filters), 0, false)).add_from(&c);
+                }
                 Action::Bump(id) => self.spawn_rpc("再接続", move |r| r.bump_channel(&id)),
                 Action::Stop(id) => self.spawn_rpc("チャンネルを停止", move |r| r.stop_channel(&id)),
                 Action::RemoveHistory(name) => {
@@ -916,7 +942,7 @@ impl App {
                 self.open_settings_dialog(cfg);
             }
             if ui.button("★ フィルター").on_hover_text("お気に入り・無視・色分け").clicked() && self.filter_dlg.is_none() {
-                self.filter_dlg = Some(FilterDlg { filters: read(&self.filters), sel: 0, scroll_to_sel: false });
+                self.filter_dlg = Some(FilterDlg::new(read(&self.filters), 0, false));
             }
             self.view_menu(ui, cfg);
             self.sort_menu(ui);
@@ -1350,6 +1376,13 @@ impl App {
             }
         } else {
             remove_filter_menu(ui, "🚫 無視をやめる", &r.ign_filters, &filters, &c.name, actions);
+        }
+        let resp = ui
+            .add_enabled(!c.is_info(), egui::Button::new("この配信者をもとにフィルターを作る…"))
+            .on_hover_text("名前やコンタクト URL から条件の雛形を作ります。当たるチャンネルを確かめてから保存できます");
+        if resp.clicked() {
+            actions.push(Action::NewFilterFrom(i));
+            ui.close();
         }
         ui.separator();
         ui.add_enabled_ui(!c.is_info(), |ui| {
@@ -1861,6 +1894,7 @@ impl App {
 
     fn filter_window(&mut self, ctx: &egui::Context) {
         let Some(dlg) = self.filter_dlg.as_mut() else { return };
+        let rows = &self.rows;
         let mut open = true;
         let mut apply = None;
         let mut cancel = false;
@@ -1873,15 +1907,32 @@ impl App {
                 let n = dlg.filters.len();
                 if ui.add_enabled(n > 0, egui::Button::new("削除")).clicked() && dlg.sel < n {
                     dlg.filters.remove(dlg.sel);
+                    // もとにしたチャンネルの番号も合わせる
+                    let sel = dlg.sel;
+                    dlg.source = dlg.source.take().and_then(|(i, c)| match i.cmp(&sel) {
+                        std::cmp::Ordering::Less => Some((i, c)),
+                        std::cmp::Ordering::Equal => None,
+                        std::cmp::Ordering::Greater => Some((i - 1, c)),
+                    });
                     dlg.sel = dlg.sel.min(dlg.filters.len().saturating_sub(1));
                 }
+                let mut moved = None;
                 if ui.add_enabled(dlg.sel > 0 && dlg.sel < n, egui::Button::new("↑")).clicked() {
-                    dlg.filters.swap(dlg.sel, dlg.sel - 1);
-                    dlg.sel -= 1;
+                    moved = Some(dlg.sel - 1);
                 }
                 if ui.add_enabled(dlg.sel + 1 < n, egui::Button::new("↓")).clicked() {
-                    dlg.filters.swap(dlg.sel, dlg.sel + 1);
-                    dlg.sel += 1;
+                    moved = Some(dlg.sel + 1);
+                }
+                if let Some(to) = moved {
+                    dlg.filters.swap(dlg.sel, to);
+                    if let Some((i, _)) = dlg.source.as_mut() {
+                        if *i == dlg.sel {
+                            *i = to;
+                        } else if *i == to {
+                            *i = dlg.sel;
+                        }
+                    }
+                    dlg.sel = to;
                 }
             });
             ui.separator();
@@ -1912,7 +1963,8 @@ impl App {
                 ui.separator();
                 ui.vertical(|ui| {
                     if let Some(f) = dlg.filters.get_mut(dlg.sel) {
-                        filter_editor(ui, f);
+                        let source = dlg.source.as_ref().filter(|(i, _)| *i == dlg.sel).map(|(_, c)| c);
+                        filter_editor(ui, f, source, &mut dlg.template, rows);
                     } else {
                         ui.label("「追加」でフィルターを作ります");
                     }
@@ -2493,8 +2545,65 @@ fn search_editor(ui: &mut egui::Ui, id: &str, s: &mut Search, toggle: Option<&st
     let _ = id;
 }
 
-fn filter_editor(ui: &mut egui::Ui, f: &mut Filter) {
+/// 行の右クリックから作ったフィルターで、雛形を選び直す欄。
+fn template_picker(ui: &mut egui::Ui, f: &mut Filter, c: &Channel, cur: &mut filter::Template) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(format!("もとにした配信: {}", c.name));
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("雛形:");
+        for t in filter::Template::ALL {
+            let hint = if t.usable(c) { t.hint() } else { "このチャンネルにはコンタクト URL がありません" };
+            let resp = ui.add_enabled(t.usable(c), egui::Button::selectable(*cur == t, t.label())).on_hover_text(hint);
+            if resp.clicked() {
+                *cur = t;
+                f.base_search = t.search(c);
+            }
+        }
+    });
+    ui.label(RichText::new("雛形を選ぶと「条件」を書き換えます。条件はそのあと自由に直せます。").weak());
+    ui.separator();
+}
+
+/// 今の一覧のうち、このフィルターが当たるチャンネルを出す。
+fn filter_preview(ui: &mut egui::Ui, f: &Filter, source: Option<&Channel>, rows: &[Row]) {
+    let Ok(c) = filter::compile_one(f) else { return };
+    let hits: Vec<&Row> = rows.iter().filter(|r| !r.ch.is_info() && c.is_match(&r.ch, &r.yp)).collect();
+    let mut keys = HashSet::new();
+    let unique = hits.iter().filter(|r| keys.insert(r.ch.key())).count();
+    ui.separator();
+    let head = if f.ignore { "このフィルターで無視するチャンネル" } else { "このフィルターが当たるチャンネル" };
+    ui.label(RichText::new(format!("{} (今の一覧で {} 件)", head, unique)).strong());
+    if let Some(src) = source
+        && !hits.iter().any(|r| r.ch.key() == src.key())
+    {
+        ui.colored_label(Color32::from_rgb(220, 140, 40), "⚠ もとにした配信に当たっていません。条件を見直してください");
+    }
+    if hits.is_empty() {
+        ui.label(RichText::new("今の一覧には当たるチャンネルがありません (これから始まる配信には当たるかもしれません)").weak());
+        return;
+    }
+    const MAX: usize = 200;
+    egui::Grid::new("fpreview").striped(true).num_columns(3).show(ui, |ui| {
+        for r in hits.iter().take(MAX) {
+            let name = RichText::new(&r.ch.name);
+            ui.label(if r.ignore { name.weak() } else { name });
+            ui.label(RichText::new(&r.ch.genre).weak());
+            ui.label(RichText::new(&r.yp).weak());
+            ui.end_row();
+        }
+    });
+    if hits.len() > MAX {
+        ui.label(RichText::new(format!("ほか {} 件", hits.len() - MAX)).weak());
+    }
+    ui.label(RichText::new("同じチャンネルがいくつかの YP に載っていれば、YP ごとに出します。いま無視しているものは薄い字です。").weak());
+}
+
+fn filter_editor(ui: &mut egui::Ui, f: &mut Filter, source: Option<&Channel>, template: &mut filter::Template, rows: &[Row]) {
     egui::ScrollArea::vertical().id_salt("fedit").auto_shrink(false).show(ui, |ui| {
+        if let Some(c) = source {
+            template_picker(ui, f, c, template);
+        }
         ui.horizontal(|ui| {
             ui.label("名前");
             ui.add_sized([200.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut f.name).hint_text("空なら条件を表示"));
@@ -2529,6 +2638,7 @@ fn filter_editor(ui: &mut egui::Ui, f: &mut Filter) {
             ui.colored_label(Color32::from_rgb(220, 60, 60), e);
         }
         ui.label(RichText::new("正規表現は Rust の regex の書き方です (JavaScript と少し違います)。").weak());
+        filter_preview(ui, f, source, rows);
     });
 }
 
