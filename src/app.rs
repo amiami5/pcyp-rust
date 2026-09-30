@@ -4,6 +4,7 @@ use crate::chandir::Channel;
 use crate::config::{self, Config, PlayUrlKind, PlayerEntry, YpEntry};
 use crate::filter::{self, CompiledFilter, FIELDS, Filter, Filters, Search};
 use crate::history;
+use crate::import::{self, Imported, Item, PlayerMode};
 use crate::peercast::{self, RelayChannel, Rpc};
 use crate::player;
 use crate::update::{self, UpdateRef};
@@ -297,6 +298,24 @@ struct SettingsDlg {
     test: Arc<Mutex<String>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportTab {
+    Filters,
+    Yps,
+    Players,
+    Other,
+}
+
+/// pcyplite から取り込む窓
+struct ImportDlg {
+    dir: String,
+    data: Option<Imported>,
+    tab: ImportTab,
+    mode: PlayerMode,
+    /// 読めなかったときの説明
+    error: String,
+}
+
 struct FilterDlg {
     filters: Vec<Filter>,
     sel: usize,
@@ -429,6 +448,7 @@ pub struct App {
 
     settings: Option<SettingsDlg>,
     filter_dlg: Option<FilterDlg>,
+    import_dlg: Option<ImportDlg>,
     show_log: bool,
     show_relay: bool,
     show_history: bool,
@@ -511,6 +531,7 @@ impl App {
             col_widths: cfg.view.column_widths.clone(),
             settings: None,
             filter_dlg: None,
+            import_dlg: None,
             show_log: false,
             show_relay: false,
             show_history: false,
@@ -1901,6 +1922,7 @@ impl App {
         let mut result: Option<bool> = None; // Some(true) で閉じる、Some(false) で適用だけ
         let mut cancel = false;
         let mut check_now = false;
+        let mut open_import = false;
         let update_state = self.update.clone();
         sub_window(ctx, &mut self.subs, "settings", "設定", [780.0, 760.0], &mut open, |ui| {
             ui.horizontal(|ui| {
@@ -1918,7 +1940,7 @@ impl App {
             ui.separator();
             let avail = ui.available_height() - 48.0;
             egui::ScrollArea::vertical().max_height(avail.max(100.0)).auto_shrink(false).show(ui, |ui| match dlg.tab {
-                SettingsTab::Yp => settings_yp(ui, &mut dlg.cfg),
+                SettingsTab::Yp => open_import = settings_yp(ui, &mut dlg.cfg),
                 SettingsTab::Update => settings_update(ui, &mut dlg.cfg),
                 SettingsTab::PeerCast => settings_peercast(ui, &mut dlg.cfg, &dlg.test),
                 SettingsTab::Player => settings_player(ui, &mut dlg.cfg),
@@ -1947,6 +1969,9 @@ impl App {
         if check_now {
             self.check_update(ctx, true);
         }
+        if open_import && self.import_dlg.is_none() {
+            self.import_dlg = Some(ImportDlg { dir: String::new(), data: None, tab: ImportTab::Filters, mode: PlayerMode::Prepend, error: String::new() });
+        }
         if let Some(close) = result {
             let dlg = self.settings.as_mut().unwrap();
             match validate(&mut dlg.cfg) {
@@ -1967,6 +1992,114 @@ impl App {
         }
         if !open {
             self.settings = None;
+        }
+    }
+
+    fn import_window(&mut self, ctx: &egui::Context) {
+        let Some(dlg) = self.import_dlg.as_mut() else { return };
+        let mut open = true;
+        let mut run = false;
+        let mut cancel = false;
+        let (cur_filters, cur_cfg) = (read(&self.filters), read(&self.config));
+        sub_window(ctx, &mut self.subs, "import", "pcyplite から取り込む", [1000.0, 640.0], &mut open, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("pcyplite のフォルダ");
+                let r = ui.add(egui::TextEdit::singleline(&mut dlg.dir).desired_width(420.0).hint_text("pcypLite.exe のあるフォルダ"));
+                let mut load = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                if ui.button("参照…").clicked()
+                    && let Some(p) = rfd::FileDialog::new().set_title("pcyplite のフォルダ").pick_folder()
+                {
+                    dlg.dir = p.display().to_string();
+                    load = true;
+                }
+                if ui.add_enabled(!dlg.dir.trim().is_empty(), egui::Button::new("読み込む")).clicked() {
+                    load = true;
+                }
+                if load {
+                    let dir = std::path::PathBuf::from(dlg.dir.trim().trim_matches('"'));
+                    let d = import::load(&dir, &cur_filters, &cur_cfg);
+                    if d.filters.is_empty() && d.yps.is_empty() && d.players.is_empty() {
+                        dlg.error = format!("{} と {} が見つかりません", import::MAIN_INI, import::FAVORITE_INI);
+                        dlg.data = None;
+                    } else {
+                        dlg.error.clear();
+                        dlg.data = Some(d);
+                    }
+                }
+            });
+            if !dlg.error.is_empty() {
+                ui.colored_label(Color32::from_rgb(220, 60, 60), &dlg.error);
+            }
+            let Some(data) = dlg.data.as_mut() else {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} (YP・プレイヤー) と {} (お気に入り) を読みます。pcyplite のファイルは書き換えません。",
+                        import::MAIN_INI,
+                        import::FAVORITE_INI
+                    ))
+                    .weak(),
+                );
+                return;
+            };
+            for w in &data.warnings {
+                ui.colored_label(Color32::from_rgb(200, 140, 0), format!("⚠ {}", w));
+            }
+            let other = (data.peercast.iter().chain(data.browser.iter()).filter(|i| i.checked).count(), data.peercast.iter().chain(data.browser.iter()).count());
+            ui.horizontal(|ui| {
+                for (t, label, (c, n)) in [
+                    (ImportTab::Filters, "お気に入り", (checked(&data.filters), data.filters.len())),
+                    (ImportTab::Yps, "YP", (checked(&data.yps), data.yps.len())),
+                    (ImportTab::Players, "プレイヤー", (checked(&data.players), data.players.len())),
+                    (ImportTab::Other, "PeerCast・ブラウザ", other),
+                ] {
+                    ui.selectable_value(&mut dlg.tab, t, format!("{} ({}/{})", label, c, n));
+                }
+            });
+            ui.separator();
+            let avail = ui.available_height() - 40.0;
+            ui.allocate_ui(egui::vec2(ui.available_width(), avail.max(120.0)), |ui| match dlg.tab {
+                ImportTab::Filters => import_filters(ui, &mut data.filters),
+                ImportTab::Yps => import_yps(ui, &mut data.yps),
+                ImportTab::Players => import_players(ui, &mut data.players, &mut dlg.mode),
+                ImportTab::Other => import_other(ui, data, &cur_cfg),
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                let n = checked(&data.filters) + checked(&data.yps) + checked(&data.players) + other.0;
+                if ui.add_enabled(n > 0, egui::Button::new("取り込む")).clicked() {
+                    run = true;
+                }
+                if ui.button("キャンセル").clicked() {
+                    cancel = true;
+                }
+                ui.label(RichText::new("チェックしたものを取り込みます。お気に入りと YP は今の設定の後ろに足します。").weak());
+            });
+        });
+        if cancel {
+            open = false;
+        }
+        if run && let Some(dlg) = self.import_dlg.as_ref() && let Some(data) = dlg.data.clone() {
+            let mode = dlg.mode;
+            let mut cfg = self.cfg();
+            let mut filters = read(&self.filters);
+            let before = filters.len();
+            let msg = import::apply(&data, mode, &mut cfg, &mut filters);
+            let added: Vec<Filter> = filters[before..].to_vec();
+            self.apply_config(ctx, cfg);
+            self.save_filters(filters);
+            // 開いている設定とフィルターの窓にも同じものを足す (OK で古い内容に戻さないように)
+            if let Some(s) = self.settings.as_mut() {
+                import::apply(&data, mode, &mut s.cfg, &mut Vec::new());
+            }
+            if let Some(f) = self.filter_dlg.as_mut() {
+                f.filters.extend(added);
+            }
+            self.log(false, msg);
+            open = false;
+        }
+        if !open {
+            self.import_dlg = None;
         }
     }
 
@@ -2296,7 +2429,8 @@ fn pick_exe(current: &mut String, filter_name: &str) {
     }
 }
 
-fn settings_yp(ui: &mut egui::Ui, cfg: &mut Config) {
+/// 「pcyplite から取り込む」を押したら true
+fn settings_yp(ui: &mut egui::Ui, cfg: &mut Config) -> bool {
     ui.label("index.txt を取得する YP。URL は http と https だけ使えます。");
     let mut remove = None;
     let mut swap = None;
@@ -2344,6 +2478,8 @@ fn settings_yp(ui: &mut egui::Ui, cfg: &mut Config) {
             cfg.yps = config::default_yps();
         }
     });
+    ui.separator();
+    ui.button("pcyplite から取り込む…").on_hover_text("pcyplite の YP、プレイヤー、お気に入りを選んで取り込みます").clicked()
 }
 
 fn settings_update(ui: &mut egui::Ui, cfg: &mut Config) {
@@ -2624,6 +2760,138 @@ fn settings_view(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.label(RichText::new(format!("設定の保存先: {}", config::base_dir().display())).weak());
 }
 
+fn checked<T>(v: &[Item<T>]) -> usize {
+    v.iter().filter(|i| i.checked).count()
+}
+
+/// 「すべて選ぶ」「すべて外す」
+fn check_all_buttons<T>(ui: &mut egui::Ui, items: &mut [Item<T>]) {
+    ui.horizontal(|ui| {
+        if ui.button("すべて選ぶ").clicked() {
+            items.iter_mut().for_each(|i| i.checked = true);
+        }
+        if ui.button("すべて外す").clicked() {
+            items.iter_mut().for_each(|i| i.checked = false);
+        }
+    });
+}
+
+/// 取り込みの一覧 (Excel の取り込みのように、行ごとにチェックで選ぶ)。
+/// 先頭の列はチェック、最後の列はメモ。間の列は `cells` で描く
+fn import_table<T>(
+    ui: &mut egui::Ui,
+    id: &str,
+    headers: &[&str],
+    widths: &[f32],
+    items: &mut [Item<T>],
+    cells: impl Fn(&mut egui_extras::TableRow, &T),
+) {
+    let row_h = ui.spacing().interact_size.y + 4.0;
+    let mut tb = TableBuilder::new(ui)
+        .id_salt(id)
+        .striped(true)
+        .resizable(true)
+        .auto_shrink(false)
+        .cell_layout(Layout::left_to_right(Align::Center))
+        .column(Column::exact(28.0));
+    for w in widths {
+        tb = tb.column(Column::initial(*w).at_least(40.0).clip(true));
+    }
+    tb.column(Column::remainder().at_least(80.0).clip(true))
+        .header(22.0, |mut h| {
+            h.col(|_| {});
+            for t in headers.iter().chain(["メモ"].iter()) {
+                h.col(|ui| {
+                    ui.strong(*t);
+                });
+            }
+        })
+        .body(|body| {
+            body.rows(row_h, items.len(), |mut row| {
+                let item = &mut items[row.index()];
+                row.col(|ui| {
+                    ui.checkbox(&mut item.checked, "");
+                });
+                cells(&mut row, &item.value);
+                row.col(|ui| {
+                    let t = RichText::new(&item.note);
+                    let t = if item.checked { t.weak() } else { t.color(Color32::from_rgb(200, 120, 0)) };
+                    ui.add(egui::Label::new(t).truncate());
+                });
+            });
+        });
+}
+
+fn text_cell(row: &mut egui_extras::TableRow, text: &str) {
+    row.col(|ui| {
+        ui.add(egui::Label::new(text).truncate());
+    });
+}
+
+fn import_filters(ui: &mut egui::Ui, items: &mut [Item<Filter>]) {
+    check_all_buttons(ui, items);
+    let fields = |f: &Filter| -> String {
+        let labels: Vec<&str> = FIELDS.iter().filter(|(k, _)| f.base_search.fields.iter().any(|x| x == k)).map(|(_, l)| *l).collect();
+        labels.join("・")
+    };
+    let headers = ["名前", "検索文字", "探す対象", "扱い", "通知", "有効"];
+    import_table(ui, "import_filters", &headers, &[150.0, 260.0, 130.0, 70.0, 44.0, 44.0], items, |row, f| {
+        text_cell(row, &f.name);
+        text_cell(row, &f.base_search.search);
+        text_cell(row, &fields(f));
+        text_cell(row, if f.ignore { "無視" } else if f.favorite { "お気に入り" } else { "色分け" });
+        text_cell(row, if f.notify { "する" } else { "" });
+        text_cell(row, if f.enabled { "有効" } else { "無効" });
+    });
+}
+
+fn import_yps(ui: &mut egui::Ui, items: &mut [Item<YpEntry>]) {
+    check_all_buttons(ui, items);
+    import_table(ui, "import_yps", &["名前", "index.txt の URL", "有効"], &[120.0, 360.0, 44.0], items, |row, y| {
+        text_cell(row, &y.name);
+        text_cell(row, &y.url);
+        text_cell(row, if y.enabled { "有効" } else { "無効" });
+    });
+}
+
+fn import_players(ui: &mut egui::Ui, items: &mut [Item<PlayerEntry>], mode: &mut PlayerMode) {
+    ui.horizontal(|ui| {
+        ui.radio_value(mode, PlayerMode::Prepend, "今のプレイヤーの前に足す");
+        ui.radio_value(mode, PlayerMode::Replace, "今のプレイヤーと置き換える");
+    });
+    check_all_buttons(ui, items);
+    import_table(ui, "import_players", &["種類", "exe", "引数"], &[70.0, 300.0, 300.0], items, |row, p| {
+        text_cell(row, &p.types);
+        text_cell(row, &p.exe);
+        text_cell(row, &p.args);
+    });
+}
+
+fn import_other(ui: &mut egui::Ui, data: &mut Imported, cur: &Config) {
+    if data.peercast.is_none() && data.browser.is_none() {
+        ui.label(RichText::new("取り込むものはありません").weak());
+        return;
+    }
+    egui::Grid::new("import_other").num_columns(4).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+        ui.label("");
+        ui.strong("取り込む値");
+        ui.strong("今の設定");
+        ui.strong("メモ");
+        ui.end_row();
+        for (item, label, now) in [
+            (data.peercast.as_mut(), "PeerCast のアドレス", cur.peercast.address.as_str()),
+            (data.browser.as_mut(), "URL を開くブラウザ", cur.browser.as_str()),
+        ] {
+            let Some(item) = item else { continue };
+            ui.checkbox(&mut item.checked, label);
+            ui.label(&item.value);
+            ui.label(if now.is_empty() { "(空)" } else { now });
+            ui.label(RichText::new(&item.note).weak());
+            ui.end_row();
+        }
+    });
+}
+
 fn search_editor(ui: &mut egui::Ui, id: &str, s: &mut Search, toggle: Option<&str>) {
     ui.horizontal(|ui| {
         match toggle {
@@ -2820,6 +3088,7 @@ impl eframe::App for App {
         self.log_window(&ctx);
         self.relay_window(&ctx);
         self.history_window(&ctx, &cfg);
+        self.import_window(&ctx);
         self.subs.end_frame();
 
         // 並べ替えを変えたら、次の起動でも同じ順になるよう保存する

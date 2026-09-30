@@ -7,6 +7,7 @@ mod fetch;
 mod filter;
 mod history;
 mod icon;
+mod import;
 mod peercast;
 mod player;
 mod update;

@@ -21,6 +21,7 @@ Windows 用の PeerCast YP ブラウザです。Rust だけで書いています
 - **PeerCast との連携**: 接続中のチャンネルの表示・停止・再接続 (JSON-RPC)、PeerCast 本体の自動起動
 - **ブラウザ**: コンタクト URL、チャット、統計を開きます (http と https の URL だけ)
 - **自動更新**: 2 分以上の間隔で設定できます (初期値 5 分)。手動の更新は、前回から 30 秒以上空けます
+- **pcyplite からの乗り換え**: 設定の「YP」タブの「pcyplite から取り込む…」で、pcyplite のフォルダから YP、プレイヤー、お気に入り、PeerCast のアドレスを読み、一覧でチェックしたものだけを取り込みます。pcyplite のファイルは書き換えません
 - **新しい版の知らせ**: 起動時と 1 日ごとに GitHub Releases を確かめ、新しい版があれば画面の上に帯で知らせます。帯からリリースの zip を落とせます。設定の「通知・トレイ」で切れます
 
 ## 動作環境
@@ -173,6 +174,7 @@ PCYP_TEST_PEERCAST=ホスト:ポート cargo test live_peercast -- --ignored --n
 | `src/player.rs` | 再生の URL、プレイヤーとブラウザの起動 |
 | `src/peercast.rs` | PeerCast との連携 (JSON-RPC、本体の起動) |
 | `src/update.rs` | 新しい版があるかの確認 (GitHub Releases) |
+| `src/import.rs` | pcyplite の設定の取り込み |
 | `src/config.rs` | 設定と保存 |
 | `src/win.rs` | ウィンドウの表示と非表示、タスクトレイ、通知 |
 
