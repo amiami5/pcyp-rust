@@ -1233,23 +1233,25 @@ impl App {
         let (mut close, mut skip) = (false, false);
         egui::Frame::new().fill(fill).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("閉じる").on_hover_text("次の起動でまた知らせます").clicked() {
-                    close = true;
-                }
-                if ui.button("この版は知らせない").clicked() {
-                    skip = true;
+            // 1 行目に文 (狭くても切らずに折り返す)、2 行目にボタン。ボタンも幅が足りなければ折り返す
+            let msg = format!("⬆ 新しい版 {} が出ています (今は v{})", release.tag, env!("CARGO_PKG_VERSION"));
+            ui.add(egui::Label::new(RichText::new(msg).color(text).strong()).wrap());
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                if !release.zip_url.is_empty()
+                    && ui.add(egui::Button::new(RichText::new("⬇ zip をダウンロード").strong())).on_hover_text(&release.zip_url).clicked()
+                {
+                    self.open_url(&release.zip_url);
                 }
                 if ui.button("リリースのページ").on_hover_text(&release.page_url).clicked() {
                     self.open_url(&release.page_url);
                 }
-                if !release.zip_url.is_empty() && ui.button("zip をダウンロード").on_hover_text(&release.zip_url).clicked() {
-                    self.open_url(&release.zip_url);
+                if ui.button("この版は知らせない").on_hover_text("この版が次に更新されるまで、この帯を出しません").clicked() {
+                    skip = true;
                 }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    let msg = format!("⬆ 新しい版 {} が出ています (今は v{})", release.tag, env!("CARGO_PKG_VERSION"));
-                    ui.add(egui::Label::new(RichText::new(msg).color(text)).truncate());
-                });
+                if ui.button("閉じる").on_hover_text("次の起動でまた知らせます").clicked() {
+                    close = true;
+                }
             });
         });
         ui.add_space(2.0);
