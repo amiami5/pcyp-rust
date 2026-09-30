@@ -3,6 +3,7 @@
 use crate::chandir::Channel;
 use crate::config::{self, Config, PlayUrlKind, PlayerEntry, YpEntry};
 use crate::filter::{self, CompiledFilter, FIELDS, Filter, Filters, Search};
+use crate::history;
 use crate::peercast::{self, RelayChannel, Rpc};
 use crate::player;
 use crate::win;
@@ -24,6 +25,8 @@ pub const BOLD: &str = "bold";
 enum Tab {
     Favorite,
     All,
+    /// NEW の印が付いたチャンネル
+    New,
     Yp(String),
     Ignored,
 }
@@ -254,6 +257,7 @@ struct Row {
 struct Counts {
     favorite: usize,
     all: usize,
+    new: usize,
     ignored: usize,
     per_yp: Vec<usize>,
 }
@@ -268,6 +272,9 @@ enum Action {
     EditFilter(usize),
     Bump(String),
     Stop(String),
+    /// 履歴からこの名前のものを消す
+    RemoveHistory(String),
+    ClearHistory,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -401,6 +408,11 @@ pub struct App {
     filter_dlg: Option<FilterDlg>,
     show_log: bool,
     show_relay: bool,
+    show_history: bool,
+    /// 履歴の窓の絞り込み
+    history_search: String,
+    /// 履歴の「すべて消す」を押して、確かめているところ
+    history_confirm_clear: bool,
     subs: SubWindows,
     relay: Arc<Mutex<RelayState>>,
     relay_last: Option<Instant>,
@@ -476,6 +488,9 @@ impl App {
             filter_dlg: None,
             show_log: false,
             show_relay: false,
+            show_history: false,
+            history_search: String::new(),
+            history_confirm_clear: false,
             subs: SubWindows { rects: cfg.view.sub_windows.clone(), ..Default::default() },
             relay: Arc::new(Mutex::new(RelayState::default())),
             relay_last: None,
@@ -558,6 +573,7 @@ impl App {
                 let m = filter::apply(&self.compiled, c, &y.name);
                 let key = c.key();
                 let duplicate = !c.is_info() && !seen.insert(key.clone());
+                let is_new = s.new_keys.contains(&key);
                 if m.ignore {
                     if !duplicate {
                         counts.ignored += 1;
@@ -569,6 +585,9 @@ impl App {
                         if m.favorite {
                             counts.favorite += 1;
                         }
+                        if is_new {
+                            counts.new += 1;
+                        }
                     }
                 }
                 rows.push(Row {
@@ -577,7 +596,7 @@ impl App {
                     favorite: m.favorite,
                     ignore: m.ignore,
                     color: color_of(&m.colors),
-                    is_new: s.new_keys.contains(&key),
+                    is_new,
                     filters: m.names.clone(),
                     fav_filters: m.favorite_filters.clone(),
                     ign_filters: m.ignore_filters.clone(),
@@ -610,6 +629,7 @@ impl App {
                 let tab_ok = match &self.tab {
                     Tab::Favorite => r.favorite && !r.ignore && !r.duplicate,
                     Tab::All => !r.ignore && !r.duplicate,
+                    Tab::New => r.is_new && !r.ignore && !r.duplicate,
                     Tab::Yp(url) => !r.ignore && &r.ch.feed_url == url && yp_name.is_some(),
                     Tab::Ignored => r.ignore && !r.duplicate,
                 };
@@ -676,9 +696,11 @@ impl App {
     }
 
     fn play(&self, ch: &Channel) {
-        match player::play(&self.cfg(), ch) {
+        let cfg = self.cfg();
+        match player::play(&cfg, ch) {
             Ok((cmd, pid)) => {
                 self.log(false, format!("再生: {}", cmd));
+                history::record_play(&self.shared, &cfg, ch);
                 self.watch_play(ch, pid);
             }
             Err(e) => self.log(true, e),
@@ -864,6 +886,15 @@ impl App {
                 },
                 Action::Bump(id) => self.spawn_rpc("再接続", move |r| r.bump_channel(&id)),
                 Action::Stop(id) => self.spawn_rpc("チャンネルを停止", move |r| r.stop_channel(&id)),
+                Action::RemoveHistory(name) => {
+                    lock(&self.shared).history.remove(&name);
+                    history::save(&self.shared);
+                }
+                Action::ClearHistory => {
+                    lock(&self.shared).history.entries.clear();
+                    history::save(&self.shared);
+                    self.log(false, "再生の履歴を消しました");
+                }
             }
         }
     }
@@ -890,6 +921,9 @@ impl App {
             self.view_menu(ui, cfg);
             self.sort_menu(ui);
             self.peercast_menu(ui, cfg);
+            if ui.selectable_label(self.show_history, "🕘 履歴").on_hover_text("再生したチャンネル").clicked() {
+                self.show_history = !self.show_history;
+            }
             if ui.selectable_label(self.show_log, "📋 ログ").clicked() {
                 self.show_log = !self.show_log;
             }
@@ -992,6 +1026,8 @@ impl App {
                 let mut tab = self.tab.clone();
                 ui.selectable_value(&mut tab, Tab::Favorite, format!("★ お気に入り ({})", c.favorite));
                 ui.selectable_value(&mut tab, Tab::All, format!("すべて ({})", c.all));
+                ui.selectable_value(&mut tab, Tab::New, format!("🆕 新着 ({})", c.new))
+                    .on_hover_text("新しく始まったチャンネル (NEW の印が付いているもの)");
                 for (i, (name, url, state)) in yps.iter().enumerate() {
                     let n = c.per_yp.get(i).copied().unwrap_or(0);
                     let (label, tip) = match state {
@@ -1604,6 +1640,153 @@ impl App {
         self.do_actions(actions);
     }
 
+    /// 再生の履歴。配信中のものは、今の一覧のチャンネルで再生する (配信し直すと ID や tip が変わるので)
+    fn history_window(&mut self, ctx: &egui::Context, cfg: &Config) {
+        if !self.show_history {
+            self.history_confirm_clear = false;
+            return;
+        }
+        let entries = lock(&self.shared).history.entries.clone();
+        // 名前から、今の一覧の行を引く
+        let mut live: HashMap<&str, usize> = HashMap::new();
+        for (i, r) in self.rows.iter().enumerate() {
+            if !r.ch.is_info() {
+                live.entry(r.ch.name.as_str()).or_insert(i);
+            }
+        }
+        let (rows, compiled, has_bold) = (&self.rows, &self.compiled, self.has_bold);
+        let (search, confirm) = (&mut self.history_search, &mut self.history_confirm_clear);
+        let mut open = true;
+        let mut actions = Vec::new();
+        sub_window(ctx, &mut self.subs, "history", "再生の履歴", [680.0, 420.0], &mut open, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(search).hint_text("🔍 絞り込み").desired_width(180.0));
+                if !search.is_empty() && ui.small_button("✖").clicked() {
+                    search.clear();
+                }
+                ui.label(format!("{} 件", entries.len()));
+                if !cfg.history.enabled {
+                    ui.label(RichText::new("(履歴を残さない設定です)").weak());
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if *confirm {
+                        if ui.button("やめる").clicked() {
+                            *confirm = false;
+                        }
+                        if ui.button("消す").clicked() {
+                            actions.push(Action::ClearHistory);
+                            *confirm = false;
+                        }
+                        ui.label("履歴をすべて消しますか？");
+                    } else if ui.add_enabled(!entries.is_empty(), egui::Button::new("すべて消す")).clicked() {
+                        *confirm = true;
+                    }
+                });
+            });
+            ui.separator();
+            if entries.is_empty() {
+                ui.label(RichText::new("まだ再生したチャンネルはありません").weak());
+                return;
+            }
+            let q = search.trim().to_lowercase();
+            let shown: Vec<&history::HistoryEntry> = entries
+                .iter()
+                .filter(|e| q.is_empty() || [&e.name, &e.genre, &e.desc, &e.yp].iter().any(|s| s.to_lowercase().contains(&q)))
+                .collect();
+            let dark = ui.visuals().dark_mode;
+            let row_h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+            ui.style_mut().interaction.selectable_labels = false;
+            TableBuilder::new(ui)
+                .id_salt("history_table")
+                .striped(true)
+                .sense(Sense::click())
+                .auto_shrink(false)
+                .cell_layout(Layout::left_to_right(Align::Center))
+                .column(Column::exact(120.0))
+                .column(Column::exact(200.0).clip(true))
+                .column(Column::remainder().at_least(80.0).clip(true))
+                .column(Column::exact(48.0))
+                .header(22.0, |mut h| {
+                    for t in ["最後に再生", "チャンネル", "ジャンル・詳細", "回数"] {
+                        h.col(|ui| {
+                            ui.strong(t);
+                        });
+                    }
+                })
+                .body(|body| {
+                    body.rows(row_h, shown.len(), |mut row| {
+                        let e = shown[row.index()];
+                        let now = live.get(e.name.as_str()).copied();
+                        row.col(|ui| {
+                            ui.label(RichText::new(&e.time).weak());
+                        });
+                        row.col(|ui| match now {
+                            Some(_) => {
+                                ui.colored_label(Color32::from_rgb(40, 170, 70), "●");
+                                let color = if dark { Color32::from_rgb(120, 175, 255) } else { Color32::from_rgb(0, 60, 200) };
+                                let t = RichText::new(&e.name).color(color);
+                                let t = if has_bold { t.family(FontFamily::Name(BOLD.into())) } else { t.strong() };
+                                ui.add(egui::Label::new(t).truncate());
+                            }
+                            None => {
+                                ui.add(egui::Label::new(RichText::new(&e.name).weak()).truncate());
+                            }
+                        });
+                        row.col(|ui| {
+                            let t = match now {
+                                Some(i) => RichText::new(rows[i].ch.summary()),
+                                None => RichText::new(e.summary()).weak(),
+                            };
+                            ui.add(egui::Label::new(t).truncate());
+                        });
+                        row.col(|ui| right(ui, format!("{} 回", e.count)));
+                        let hover = match now {
+                            Some(_) => "配信中。ダブルクリックで再生".to_string(),
+                            None => format!("いまは配信していません (YP: {})", if e.yp.is_empty() { "-" } else { &e.yp }),
+                        };
+                        let resp = row.response().on_hover_text(hover);
+                        if let Some(i) = now {
+                            if resp.double_clicked() {
+                                actions.push(Action::Play(i));
+                            } else if resp.clicked() {
+                                actions.push(Action::Select(i));
+                            }
+                        }
+                        resp.context_menu(|ui| {
+                            if ui.add_enabled(now.is_some(), egui::Button::new("▶ 再生")).clicked() {
+                                actions.extend(now.map(Action::Play));
+                                ui.close();
+                            }
+                            let url = now.map(|i| rows[i].ch.url.clone()).unwrap_or_else(|| e.url.clone());
+                            if ui.add_enabled(!url.is_empty(), egui::Button::new("コンタクト URL を開く")).clicked() {
+                                actions.push(Action::OpenUrl(url));
+                                ui.close();
+                            }
+                            let favorite = match now {
+                                Some(i) => rows[i].favorite,
+                                None => filter::apply(compiled, &e.channel(), &e.yp).favorite,
+                            };
+                            if !favorite && ui.button("★ お気に入りに追加").clicked() {
+                                actions.push(Action::AddFilter(e.name.clone(), false));
+                                ui.close();
+                            }
+                            if ui.button("名前をコピー").clicked() {
+                                ui.ctx().copy_text(e.name.clone());
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("履歴から消す").clicked() {
+                                actions.push(Action::RemoveHistory(e.name.clone()));
+                                ui.close();
+                            }
+                        });
+                    });
+                });
+        });
+        self.show_history = open;
+        self.do_actions(actions);
+    }
+
     fn open_settings_dialog(&mut self, cfg: &Config) {
         if self.settings.is_none() {
             self.settings = Some(SettingsDlg { cfg: cfg.clone(), tab: SettingsTab::Yp, error: String::new(), test: Arc::new(Mutex::new(String::new())) });
@@ -1963,6 +2146,7 @@ fn validate(cfg: &mut Config) -> Result<(), String> {
         }
     }
     cfg.update_interval_min = cfg.update_interval_min.max(config::MIN_AUTO_INTERVAL_MIN);
+    cfg.history.max = cfg.history.max.max(1);
     Ok(())
 }
 
@@ -2049,6 +2233,13 @@ fn settings_update(ui: &mut egui::Ui, cfg: &mut Config) {
         ))
         .weak(),
     );
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("新しく始まったチャンネルに NEW の印を");
+        ui.add(egui::DragValue::new(&mut cfg.new_mark_min).range(0..=720));
+        ui.label("分出す");
+    });
+    ui.label(RichText::new("時間がたったかは更新のたびに調べるので、印は時間を過ぎた次の更新で消えます。0 分なら次の更新まで出します。").weak());
 }
 
 fn settings_peercast(ui: &mut egui::Ui, cfg: &mut Config, test: &Arc<Mutex<String>>) {
@@ -2259,6 +2450,16 @@ fn settings_view(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.checkbox(&mut cfg.view.hide_ignored_tab, "無視のタブを隠す");
     ui.checkbox(&mut cfg.view.show_tooltips, "一覧で省略された文字に、カーソルを合わせると全文を出す (ツールチップ)");
     ui.separator();
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut cfg.history.enabled, "再生したチャンネルを履歴に残す");
+        ui.add_enabled_ui(cfg.history.enabled, |ui| {
+            ui.label("最大");
+            ui.add(egui::DragValue::new(&mut cfg.history.max).range(1..=5000));
+            ui.label("件");
+        });
+    });
+    ui.label(RichText::new(format!("履歴は {} に保存します。同じ名前のチャンネルは 1 件にまとめます。", config::HISTORY_FILE)).weak());
+    ui.separator();
     ui.label(RichText::new(format!("設定の保存先: {}", config::base_dir().display())).weak());
 }
 
@@ -2379,7 +2580,12 @@ impl eframe::App for App {
             if self.view.is_empty() {
                 let fetching = lock(&self.shared).fetching;
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new(if fetching { "取得中…" } else { "チャンネルはありません" }).weak());
+                    let text = match &self.tab {
+                        _ if fetching => "取得中…",
+                        Tab::New => "新しく始まったチャンネルはありません",
+                        _ => "チャンネルはありません",
+                    };
+                    ui.label(RichText::new(text).weak());
                 });
             } else {
                 self.table(ui, &cfg);
@@ -2390,6 +2596,7 @@ impl eframe::App for App {
         self.filter_window(&ctx);
         self.log_window(&ctx);
         self.relay_window(&ctx);
+        self.history_window(&ctx, &cfg);
         self.subs.end_frame();
 
         // 並べ替えを変えたら、次の起動でも同じ順になるよう保存する

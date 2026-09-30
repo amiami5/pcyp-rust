@@ -44,9 +44,11 @@ pub struct Shared {
     pub fetching: bool,
     pub last_fetch: Option<Instant>,
     pub next_auto: Option<Instant>,
-    /// 直前の取得で新しく現れたチャンネルのキー
+    /// NEW の印を出すチャンネルのキー (新しく現れてから、設定の時間がたっていないもの)
     pub new_keys: HashSet<String>,
     pub log: VecDeque<LogLine>,
+    /// 再生の履歴
+    pub history: crate::history::History,
 }
 
 impl Shared {
@@ -73,6 +75,15 @@ pub enum Command {
 }
 
 pub type SharedRef = Arc<Mutex<Shared>>;
+
+/// これまでの取得で見えたチャンネル (取得のスレッドだけが持つ)
+#[derive(Default)]
+pub struct Seen {
+    /// YP ごとに、前回の取得で見えたチャンネルのキー
+    per_yp: HashMap<String, HashSet<String>>,
+    /// 新しく現れたチャンネルと、現れたのに気づいた時刻
+    new_at: HashMap<String, Instant>,
+}
 
 /// 通知の方法 (テストでは差し替える)。
 pub type Notifier = Arc<dyn Fn(&[Channel]) + Send + Sync>;
@@ -124,8 +135,7 @@ impl Worker {
             let mut s = lock(&self.shared);
             sync_yps(&mut s, &cfg);
         }
-        // YP ごとに、前回の取得で見えたチャンネルのキー
-        let mut seen: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut seen = Seen::default();
         let mut next_auto = Instant::now() + if cfg.fetch_on_start { Duration::ZERO } else { Duration::from_secs(cfg.update_interval_sec()) };
         loop {
             let cfg = self.cfg();
@@ -162,7 +172,7 @@ impl Worker {
     }
 
     /// 有効な YP を並列に取る。1 つの YP が失敗しても、ほかの YP の一覧は使う。
-    pub fn fetch_all(&self, cfg: &Config, seen: &mut HashMap<String, HashSet<String>>) {
+    pub fn fetch_all(&self, cfg: &Config, seen: &mut Seen) {
         let targets: Vec<(String, String)> = {
             let mut s = lock(&self.shared);
             sync_yps(&mut s, cfg);
@@ -220,24 +230,30 @@ impl Worker {
     }
 
     /// 新しく現れたチャンネルを調べ、通知するものを返す。
-    fn finish_fetch(&self, cfg: &Config, seen: &mut HashMap<String, HashSet<String>>) -> Vec<Channel> {
+    ///
+    /// NEW の印は、現れてから設定の時間 (`new_mark_min`) がたつまで残す。たったかどうかは取得のたびに調べるので、
+    /// 印が消えるのはその時間を過ぎた次の取得のとき。0 分なら次の取得で消える。
+    fn finish_fetch(&self, cfg: &Config, seen: &mut Seen) -> Vec<Channel> {
         let filters = self.filters.read().unwrap_or_else(|e| e.into_inner()).clone();
         let (compiled, _) = filter::compile(&filters);
+        let now = Instant::now();
         let mut s = lock(&self.shared);
-        let mut new_keys = HashSet::new();
+        let mut present = HashSet::new();
         let mut notify = Vec::new();
         let mut notified = HashSet::new();
         for y in &s.yps {
+            let keys: HashSet<String> = y.channels.iter().map(Channel::key).collect();
             if y.state != FetchState::Ok {
+                // 取れなかった YP は前の一覧を出したままなので、その印も残す
+                present.extend(keys);
                 continue;
             }
-            let keys: HashSet<String> = y.channels.iter().map(Channel::key).collect();
-            let prev = seen.get(&y.url);
+            let prev = seen.per_yp.get(&y.url);
             for c in &y.channels {
                 let key = c.key();
                 let is_new = prev.is_some_and(|p| !p.contains(&key));
-                if is_new {
-                    new_keys.insert(key.clone());
+                if is_new && !c.is_info() {
+                    seen.new_at.entry(key.clone()).or_insert(now);
                 }
                 let first = prev.is_none();
                 if cfg.notify.enabled && !c.is_info() && (is_new || first && cfg.notify.on_first_fetch) && !notified.contains(&key) {
@@ -248,9 +264,12 @@ impl Worker {
                     }
                 }
             }
-            seen.insert(y.url.clone(), keys);
+            present.extend(keys.iter().cloned());
+            seen.per_yp.insert(y.url.clone(), keys);
         }
-        s.new_keys = new_keys;
+        let keep = Duration::from_secs(cfg.new_mark_min as u64 * 60);
+        seen.new_at.retain(|k, t| present.contains(k) && (*t == now || now.duration_since(*t) < keep));
+        s.new_keys = seen.new_at.keys().cloned().collect();
         s.fetching = false;
         s.generation += 1;
         for c in &notify {
@@ -287,7 +306,7 @@ mod tests {
             notifier: Arc::new(move |c: &[Channel]| n2.lock().unwrap().extend(c.iter().map(|c| c.name.clone()))),
             fetcher: Arc::new(move |_, _| Ok(t2.lock().unwrap().clone())),
         };
-        let mut seen = HashMap::new();
+        let mut seen = Seen::default();
         w.fetch_all(&cfg, &mut seen);
         // 最初の取得では通知しない
         assert!(notified.lock().unwrap().is_empty());
@@ -297,6 +316,49 @@ mod tests {
         let s = lock(&w.shared);
         assert_eq!(s.new_keys.len(), 2);
         assert_eq!(s.yps[0].channels.len(), 3);
+        drop(s);
+
+        // 設定の時間 (初期値 15 分) がたつまでは、次の取得でも NEW のまま
+        w.fetch_all(&cfg, &mut seen);
+        assert_eq!(lock(&w.shared).new_keys.len(), 2);
+        // B が現れたのは 20 分前だったことにする。C はまだ新しい。A は初めからあるので NEW にならない
+        let b = "22222222222222222222222222222222";
+        if let Some(t) = Instant::now().checked_sub(Duration::from_secs(20 * 60)) {
+            seen.new_at.insert(b.into(), t);
+            w.fetch_all(&cfg, &mut seen);
+            let keys = lock(&w.shared).new_keys.clone();
+            assert_eq!(keys, HashSet::from(["33333333333333333333333333333333".to_string()]));
+        }
+        // 一覧から消えたチャンネルは、印も消す
+        *text.lock().unwrap() = line("A", "11111111111111111111111111111111");
+        w.fetch_all(&cfg, &mut seen);
+        assert!(lock(&w.shared).new_keys.is_empty());
+    }
+
+    #[test]
+    fn new_mark_zero_lasts_one_fetch() {
+        let text = Arc::new(Mutex::new(line("A", "11111111111111111111111111111111")));
+        let cfg = Config {
+            yps: vec![crate::config::YpEntry { name: "T".into(), url: "http://t/index.txt".into(), enabled: true }],
+            new_mark_min: 0,
+            ..Default::default()
+        };
+        let t2 = text.clone();
+        let w = Worker {
+            config: Arc::new(RwLock::new(cfg.clone())),
+            filters: Arc::new(RwLock::new(vec![])),
+            shared: Arc::new(Mutex::new(Shared::default())),
+            repaint: Arc::new(|| {}),
+            notifier: Arc::new(|_: &[Channel]| {}),
+            fetcher: Arc::new(move |_, _| Ok(t2.lock().unwrap().clone())),
+        };
+        let mut seen = Seen::default();
+        w.fetch_all(&cfg, &mut seen);
+        *text.lock().unwrap() = format!("{}\n{}", line("A", "11111111111111111111111111111111"), line("B", "22222222222222222222222222222222"));
+        w.fetch_all(&cfg, &mut seen);
+        assert_eq!(lock(&w.shared).new_keys.len(), 1);
+        w.fetch_all(&cfg, &mut seen);
+        assert!(lock(&w.shared).new_keys.is_empty());
     }
 
     #[test]
@@ -318,7 +380,7 @@ mod tests {
                 if url.contains("ok") { Ok(line("A", "11111111111111111111111111111111")) } else { Err("boom".into()) }
             }),
         };
-        w.fetch_all(&cfg, &mut HashMap::new());
+        w.fetch_all(&cfg, &mut Seen::default());
         let s = lock(&w.shared);
         assert_eq!(s.yps[0].state, FetchState::Ok);
         assert_eq!(s.yps[0].channels.len(), 1);

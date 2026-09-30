@@ -5,6 +5,7 @@ mod chandir;
 mod config;
 mod fetch;
 mod filter;
+mod history;
 mod icon;
 mod peercast;
 mod player;
@@ -116,7 +117,10 @@ fn main() -> eframe::Result {
     // 読めなかったファイルは消さずに退避し、控えから読む。何があったかは画面の上で知らせる
     let loaded_cfg: config::Loaded<Config> = config::load_json(config::CONFIG_FILE);
     let loaded_filters: config::Loaded<Filters> = config::load_json(config::FILTER_FILE);
-    let notices: Vec<String> = loaded_cfg.notices.into_iter().chain(loaded_filters.notices).collect();
+    let loaded_history: config::Loaded<history::History> = config::load_json(config::HISTORY_FILE);
+    worker::lock(&shared).history = loaded_history.value;
+    let notices: Vec<String> =
+        loaded_cfg.notices.into_iter().chain(loaded_filters.notices).chain(loaded_history.notices).collect();
     for n in &notices {
         worker::lock(&shared).log(true, n.clone());
     }
