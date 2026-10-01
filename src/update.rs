@@ -87,7 +87,9 @@ pub fn is_newer(tag: &str, current: &str) -> bool {
 
 /// 最新のリリースを取ってくる。公開したリリースが 1 つもなければ `None`。
 pub fn fetch_latest() -> Result<Option<Release>, String> {
+    // 転送には付いていかない
     let config = ureq::Agent::config_builder()
+        .max_redirects(0)
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(20)))
         .user_agent(crate::fetch::USER_AGENT)
