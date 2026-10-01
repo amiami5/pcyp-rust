@@ -2229,6 +2229,7 @@ dependencies = [
  "egui_extras",
  "embed-resource",
  "encoding_rs",
+ "flate2",
  "raw-window-handle",
  "regex",
  "rfd",

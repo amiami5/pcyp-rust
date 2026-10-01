@@ -104,7 +104,7 @@ pub fn fetch_latest() -> Result<Option<Release>, String> {
         404 => return Ok(None),
         s => return Err(format!("HTTP {}", s)),
     }
-    let body = resp.body_mut().with_config().limit(4 * 1024 * 1024).read_to_string().map_err(|e| e.to_string())?;
+    let body = crate::fetch::read_body_string(&mut resp, 4 * 1024 * 1024)?;
     parse_release(&body)
 }
 

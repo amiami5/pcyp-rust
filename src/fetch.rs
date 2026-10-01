@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 pub const USER_AGENT: &str = concat!("YPBrowser/", env!("CARGO_PKG_VERSION"), " (pcyp-rust)");
-/// 本体の上限
-pub const MAX_BODY: u64 = 32 * 1024 * 1024;
+/// 本体の上限 (gzip などを展開した後の大きさ)
+pub const MAX_BODY: u64 = 4 * 1024 * 1024;
 
 /// 転送には自動で付いていかない。付いていくと、YP がローカルの PeerCast
 /// (`http://127.0.0.1:7144/admin?...`) などへ要求を打たせられるため。
@@ -31,6 +31,29 @@ pub fn decode_text(bytes: &[u8]) -> String {
         Ok(s) => s.to_string(),
         Err(_) => encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned(),
     }
+}
+
+/// 本文を `max` バイトまで読む。超えたら失敗。
+/// `limit()` は圧縮されたままの大きさにしかかからないので、展開した後の大きさでも打ち切る。
+pub fn read_body(resp: &mut ureq::http::Response<ureq::Body>, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    resp.body_mut()
+        .with_config()
+        .limit(max)
+        .reader()
+        .take(max + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() as u64 > max {
+        return Err(format!("応答が大きすぎます ({} バイトまで)", max));
+    }
+    Ok(buf)
+}
+
+/// [`read_body`] を UTF-8 の文字列として読む。
+pub fn read_body_string(resp: &mut ureq::http::Response<ureq::Body>, max: u64) -> Result<String, String> {
+    String::from_utf8(read_body(resp, max)?).map_err(|e| e.to_string())
 }
 
 fn get(agent: &ureq::Agent, url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
@@ -115,7 +138,7 @@ pub fn fetch_index(feed_url: &str, peercast_port: u16) -> Result<String, String>
     if status.as_u16() != 200 {
         return Err(format!("HTTP {}", status));
     }
-    let body = resp.body_mut().with_config().limit(MAX_BODY).read_to_vec().map_err(|e| e.to_string())?;
+    let body = read_body(&mut resp, MAX_BODY)?;
     Ok(decode_text(&body))
 }
 
@@ -212,6 +235,44 @@ mod tests {
         assert!(err.contains("転送"), "{}", err);
         h.join().unwrap();
         assert!(target.accept().is_err());
+    }
+
+    #[test]
+    fn stops_gzip_bomb_after_decompression() {
+        use flate2::{Compression, write::GzEncoder};
+        let mut gz = GzEncoder::new(Vec::new(), Compression::best());
+        gz.write_all(&vec![b'\n'; (MAX_BODY * 4) as usize]).unwrap();
+        let gz = gz.finish().unwrap();
+        assert!((gz.len() as u64) < MAX_BODY);
+        let mut resp = format!(
+            "HTTP/1.1 200 OK
+Content-Encoding: gzip
+Content-Length: {}
+Connection: close
+
+",
+            gz.len()
+        )
+        .into_bytes();
+        resp.extend_from_slice(&gz);
+        let (port, h) = serve_once(resp);
+        let err = fetch_index(&format!("http://127.0.0.1:{}/index.txt", port), 7144).unwrap_err();
+        assert!(err.contains("大きすぎ"), "{}", err);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn rejects_too_large_body() {
+        let n = MAX_BODY as usize + 1;
+        let mut resp = format!("HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+", n).into_bytes();
+        resp.extend(std::iter::repeat_n(b'\n', n));
+        let (port, h) = serve_once(resp);
+        assert!(fetch_index(&format!("http://127.0.0.1:{}/index.txt", port), 7144).is_err());
+        h.join().unwrap();
     }
 
     #[test]

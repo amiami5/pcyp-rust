@@ -28,5 +28,8 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+[dev-dependencies]
+flate2 = "1"
+
 [build-dependencies]
 embed-resource = "3"
