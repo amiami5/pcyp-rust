@@ -319,9 +319,25 @@ pub fn side_url(feed_url: &str, file: &str, encoded_name: &str) -> String {
         return String::new();
     }
     match feed_url.rfind('/') {
-        Some(i) if is_http_url(feed_url) => format!("{}/{}?cn={}", &feed_url[..i], file, encoded_name),
+        Some(i) if is_http_url(feed_url) => format!("{}/{}?cn={}", &feed_url[..i], file, reencode(encoded_name)),
         _ => String::new(),
     }
+}
+
+/// YP がエンコードした値を、クエリの値としてそのまま使えるようにする。
+/// 正しい `%XX` と `+` は残し、ほかの英数字と一部の記号でないものは %XX にする。
+fn reencode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    for (i, &c) in b.iter().enumerate() {
+        let pct = c == b'%' && b.len() > i + 2 && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit();
+        match c {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'+' => out.push(c as char),
+            b'%' if pct => out.push('%'),
+            _ => out.push_str(&format!("%{:02X}", c)),
+        }
+    }
+    out
 }
 
 /// コンテンツの種類から、ストリームの URL に付ける拡張子。
@@ -569,6 +585,11 @@ mod tests {
     fn side_url_rules() {
         assert_eq!(side_url("http://yp/sp/index.txt", "chat.php", "abc"), "http://yp/sp/chat.php?cn=abc");
         assert_eq!(side_url("http://yp/sp/index.txt", "chat.php", ""), "");
+        assert_eq!(side_url("http://yp/sp/index.txt", "chat.php", "%E4%BA+a"), "http://yp/sp/chat.php?cn=%E4%BA+a");
+        assert_eq!(
+            side_url("http://yp/sp/index.txt", "chat.php", "a&b=c#d\"<%zz %"),
+            "http://yp/sp/chat.php?cn=a%26b%3Dc%23d%22%3C%25zz%20%25"
+        );
     }
 
     #[test]
