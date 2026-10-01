@@ -29,7 +29,7 @@ pub const URL_PLACEHOLDERS: &[(&str, &str)] = &[
     ("$ID", "チャンネル ID"),
     ("$EXT", "種類に合う拡張子 (.flv など。ない種類は空)"),
     ("$TIP", "トラッカー (URL エンコード済み)"),
-    ("$TYPE", "種類 (FLV など)"),
+    ("$TYPE", "種類 (FLV など。URL エンコード済み)"),
     ("$NAME", "チャンネル名 (URL エンコード済み)"),
 ];
 
@@ -39,10 +39,11 @@ pub fn custom_url(pc: &PeerCastConfig, c: &Channel) -> String {
     let base = base(pc);
     let tip = chandir::url_encode(&c.tip);
     let name = chandir::url_encode(&c.name);
+    let content_type = chandir::url_encode(&c.content_type);
     let table = [
         ("$BASE", base.as_str()),
         ("$NAME", name.as_str()),
-        ("$TYPE", c.content_type.as_str()),
+        ("$TYPE", content_type.as_str()),
         ("$EXT", chandir::type_ext(&c.content_type)),
         ("$TIP", tip.as_str()),
         ("$ID", c.id.as_str()),
@@ -123,32 +124,47 @@ pub const PLACEHOLDERS: &[(&str, &str)] = &[
     ("$BITRATE", "ビットレート"),
 ];
 
+/// YP から来た値を引数に入れる前に、`"` と制御文字を除く。
+/// `\"` を解釈しないプレイヤー (Delphi 製など) では、`"` があると引数の区切りがずれるため。
+fn arg_safe(s: &str) -> String {
+    s.chars().filter(|&ch| ch != '"' && !ch.is_control()).collect()
+}
+
 pub fn expand_args(template: &str, pc: &PeerCastConfig, c: &Channel) -> Vec<String> {
     let url = play_url(pc, c);
     let stream = stream_url(pc, c);
     let pls = playlist_url(pc, c);
     let bitrate = c.bitrate.to_string();
+    let [contact, comment, genre, name, content_type, desc, tip, id] =
+        [&c.url, &c.comment, &c.genre, &c.name, &c.content_type, &c.desc, &c.tip, &c.id].map(|v| arg_safe(v));
     // 長い名前から置き換える
     let table: [(&str, &str); 17] = [
-        ("$CONTACT", &c.url),
-        ("$COMMENT", &c.comment),
+        ("$CONTACT", &contact),
+        ("$COMMENT", &comment),
         ("$BITRATE", &bitrate),
         ("$STREAM", &stream),
-        ("$GENRE", &c.genre),
-        ("$NAME", &c.name),
-        ("$TYPE", &c.content_type),
-        ("$DESC", &c.desc),
+        ("$GENRE", &genre),
+        ("$NAME", &name),
+        ("$TYPE", &content_type),
+        ("$DESC", &desc),
         ("$URL", &url),
         ("$PLS", &pls),
-        ("$TIP", &c.tip),
-        ("$ID", &c.id),
+        ("$TIP", &tip),
+        ("$ID", &id),
         ("<stream/>", &url),
-        ("<channelname/>", &c.name),
-        ("<contact/>", &c.url),
-        ("<id/>", &c.id),
-        ("<tip/>", &c.tip),
+        ("<channelname/>", &name),
+        ("<contact/>", &contact),
+        ("<id/>", &id),
+        ("<tip/>", &tip),
     ];
-    split_args(template).into_iter().map(|arg| replace_tokens(&arg, &table)).collect()
+    split_args(template)
+        .into_iter()
+        .map(|arg| {
+            let out = replace_tokens(&arg, &table);
+            // 雛形にない - で始まると、プレイヤーがオプションとして読むので、前に空白を足す
+            if out.starts_with('-') && !arg.starts_with('-') { format!(" {}", out) } else { out }
+        })
+        .collect()
 }
 
 /// 相対パスなら、exe のフォルダからの位置として探す。なければそのまま (PATH から探す)。
@@ -260,11 +276,29 @@ mod tests {
     }
 
     #[test]
+    fn yp_values_cannot_add_args() {
+        let pc = PeerCastConfig::default();
+        let mut c = ch();
+        c.name = "x\" --script=\\evil\\a.lua \"y\r\n".into();
+        let a = expand_args(r#"--force-media-title="$NAME" "$URL""#, &pc, &c);
+        assert_eq!(a[0], r"--force-media-title=x --script=\evil\a.lua y");
+        // 単独の引数になる名前が - で始まっても、オプションにならない
+        c.name = "--script=a.lua".into();
+        let a = expand_args(r#""$NAME" "$URL""#, &pc, &c);
+        assert_eq!(a[0], " --script=a.lua");
+        // 雛形の - はそのまま
+        assert_eq!(expand_args("-x $ID", &pc, &c)[0], "-x");
+    }
+
+    #[test]
     fn custom_url_template() {
         let mut pc = PeerCastConfig { url_kind: PlayUrlKind::Custom, ..Default::default() };
         // 初期値は /stream/ と同じ
         assert_eq!(play_url(&pc, &ch()), stream_url(&pc, &ch()));
         pc.custom_url = "$BASE/pls/$ID?tip=$TIP&type=$TYPE&n=$NAME".into();
+        let mut c = ch();
+        c.content_type = "A&B".into();
+        assert!(play_url(&pc, &c).contains("&type=A%26B&"));
         assert_eq!(
             play_url(&pc, &ch()),
             "http://127.0.0.1:7144/pls/97968780D09CC97BB98D4A2BF221EDE7?tip=127.0.0.1:7144&type=FLV&n=%E4%BA%88%E5%AE%9A%E5%9C%B0%20%22x%22"
