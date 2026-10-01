@@ -50,7 +50,10 @@ fn base64(input: &[u8]) -> String {
 
 /// JSON-RPC 2.0 のクライアント (`/api/1`)。
 pub struct Rpc {
+    /// POST 用 (パスワードがあれば ?pass= 付き)
     url: String,
+    /// 認証なしで聞く GET 用 (?pass= なし)
+    get_url: String,
     auth: Option<String>,
     has_password: bool,
     agent: ureq::Agent,
@@ -74,6 +77,7 @@ impl Rpc {
             } else {
                 format!("{}/api/1?pass={}", cfg.base_url(), crate::chandir::url_encode(&cfg.password))
             },
+            get_url: format!("{}/api/1", cfg.base_url()),
             auth,
             has_password: !cfg.password.is_empty(),
             agent: ureq::Agent::new_with_config(config),
@@ -114,12 +118,9 @@ impl Rpc {
 
     /// PeerCast YT は `GET /api/1` に認証なしで getVersionInfo の結果を返す (LAN からでも)。
     /// POST の JSON-RPC は localhost 以外からだとログインが要るので、まず GET で聞く。
+    /// この GET にはパスワードを付けない (見張りで 10 秒ごとに呼ぶので)。答えなければ POST で聞き直す。
     fn get_version(&self) -> Result<Value, String> {
-        let mut req = self.agent.get(&self.url);
-        if let Some(a) = &self.auth {
-            req = req.header("Authorization", a);
-        }
-        let mut resp = req.call().map_err(|e| e.to_string())?;
+        let mut resp = self.agent.get(&self.get_url).call().map_err(|e| e.to_string())?;
         if resp.status().as_u16() != 200 {
             return Err(format!("HTTP {}", resp.status()));
         }
