@@ -121,8 +121,14 @@ fn main() -> eframe::Result {
     let loaded_filters: config::Loaded<Filters> = config::load_json(config::FILTER_FILE);
     let loaded_history: config::Loaded<history::History> = config::load_json(config::HISTORY_FILE);
     worker::lock(&shared).history = loaded_history.value;
-    let notices: Vec<String> =
-        loaded_cfg.notices.into_iter().chain(loaded_filters.notices).chain(loaded_history.notices).collect();
+    // 前の版が平文で書いたパスワードを暗号にする
+    let notices: Vec<String> = loaded_cfg
+        .notices
+        .into_iter()
+        .chain(loaded_filters.notices)
+        .chain(loaded_history.notices)
+        .chain(config::encrypt_plain_password())
+        .collect();
     for n in &notices {
         worker::lock(&shared).log(true, n.clone());
     }
