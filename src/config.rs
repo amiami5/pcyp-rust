@@ -69,6 +69,8 @@ pub struct PeerCastConfig {
     pub address: String,
     /// JSON-RPC 用。空なら認証しない。
     pub user: String,
+    /// ファイルには Windows の DPAPI で暗号にして書く (今のユーザーでだけ戻せる)
+    #[serde(with = "secret")]
     pub password: String,
     /// PeerCast 本体の exe。空なら起動しない。
     pub exe_path: String,
@@ -516,6 +518,114 @@ pub fn save_json<T: Serialize>(file: &str, value: &T) -> Result<(), String> {
     save_json_at(&base_dir().join(file), value)
 }
 
+/// パスワードを、ファイルに平文で残さないための読み書き。
+///
+/// 書くときは `dpapi:` と DPAPI で暗号にしたものの 16 進。読むときは、`dpapi:` で始まらなければ
+/// 前の版の平文として読む。戻せなければ (別のユーザーや PC で読んだとき) 空にする。
+mod secret {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub const PREFIX: &str = "dpapi:";
+
+    pub fn serialize<S: Serializer>(v: &str, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&encode(v))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        Ok(decode(&String::deserialize(d)?))
+    }
+
+    pub fn encode(v: &str) -> String {
+        if v.is_empty() {
+            return String::new();
+        }
+        match crypt(v.as_bytes(), true) {
+            Some(b) => format!("{}{}", PREFIX, b.iter().map(|x| format!("{:02x}", x)).collect::<String>()),
+            // 暗号にできなければ、パスワードを失うよりは平文で残す
+            None => v.to_string(),
+        }
+    }
+
+    pub fn decode(v: &str) -> String {
+        let Some(hex) = v.strip_prefix(PREFIX) else {
+            return v.to_string();
+        };
+        if hex.len() % 2 != 0 {
+            return String::new();
+        }
+        let bytes: Option<Vec<u8>> =
+            (0..hex.len() / 2).map(|i| hex.get(i * 2..i * 2 + 2).and_then(|h| u8::from_str_radix(h, 16).ok())).collect();
+        bytes.and_then(|b| crypt(&b, false)).and_then(|b| String::from_utf8(b).ok()).unwrap_or_default()
+    }
+
+    /// DPAPI で暗号にする (`encrypt` が false なら戻す)。
+    #[cfg(windows)]
+    fn crypt(data: &[u8], encrypt: bool) -> Option<Vec<u8>> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Cryptography::*;
+        let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        let null = std::ptr::null();
+        let ok = unsafe {
+            if encrypt {
+                CryptProtectData(&input, null as _, null as _, null, null as _, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+            } else {
+                CryptUnprotectData(&input, std::ptr::null_mut(), null as _, null, null as _, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+            }
+        };
+        if ok == 0 || out.pbData.is_null() {
+            return None;
+        }
+        let v = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec() };
+        unsafe { LocalFree(out.pbData as _) };
+        Some(v)
+    }
+
+    #[cfg(not(windows))]
+    fn crypt(_: &[u8], _: bool) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// 前の版が平文で書いたパスワードを、設定の本体と `.bak` の中で暗号にする。ほかの値は変えない。
+pub fn encrypt_plain_password() -> Vec<String> {
+    let path = base_dir().join(CONFIG_FILE);
+    let mut errors = Vec::new();
+    for p in [backup_path(&path), path] {
+        let ReadResult::Ok(mut v) = read_json::<serde_json::Value>(&p) else {
+            continue;
+        };
+        let Some(pw) = v.pointer_mut("/peercast/password") else {
+            continue;
+        };
+        let Some(enc) = pw
+            .as_str()
+            .filter(|s| !s.is_empty() && !s.starts_with(secret::PREFIX))
+            .map(secret::encode)
+            .filter(|e| e.starts_with(secret::PREFIX))
+        else {
+            continue;
+        };
+        *pw = serde_json::Value::String(enc);
+        if let Err(e) = write_replace(&p, &v) {
+            errors.push(format!("{} のパスワードを暗号にできません: {}", p.display(), e));
+        }
+    }
+    errors
+}
+
+/// 一時ファイルに書き、ディスクまで書き出してから置き換える (`.bak` は作らない)。
+fn write_replace<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = sibling(path, ".tmp");
+    let s = serde_json::to_string_pretty(value).map_err(std::io::Error::other)?;
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(s.as_bytes())?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
+}
+
 /// YP の URL として受け付けるか (http と https だけ)。
 pub fn valid_yp_url(url: &str) -> bool {
     let l = url.trim().to_ascii_lowercase();
@@ -534,6 +644,25 @@ mod tests {
         assert_eq!(c.peercast.host(), "192.0.2.1");
         assert_eq!(c.peercast.url_kind, PlayUrlKind::Stream);
         assert_eq!(c.yps.len(), 5);
+    }
+
+    #[test]
+    fn password_is_not_saved_in_plain() {
+        let mut c = Config::default();
+        c.peercast.password = "ひみつ pass".into();
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(!s.contains("ひみつ") && !s.contains("pass\""));
+        assert!(s.contains("\"password\":\"dpapi:"));
+        let back: Config = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.peercast.password, "ひみつ pass");
+        // 前の版の平文も読める
+        let old: Config = serde_json::from_str(r#"{"peercast": {"password": "plain"}}"#).unwrap();
+        assert_eq!(old.peercast.password, "plain");
+        // 戻せないものは空
+        let bad: Config = serde_json::from_str(r#"{"peercast": {"password": "dpapi:00ff"}}"#).unwrap();
+        assert_eq!(bad.peercast.password, "");
+        // 空は空のまま
+        assert!(serde_json::to_string(&Config::default()).unwrap().contains("\"password\":\"\""));
     }
 
     #[test]
