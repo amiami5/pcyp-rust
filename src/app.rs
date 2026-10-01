@@ -1887,7 +1887,7 @@ impl App {
                                 actions.extend(now.map(Action::Play));
                                 ui.close();
                             }
-                            let url = now.map(|i| rows[i].ch.url.clone()).unwrap_or_else(|| e.url.clone());
+                            let url = now.map(|i| rows[i].ch.url.clone()).unwrap_or_else(|| crate::chandir::contact_url_or_empty(&e.url));
                             if ui.add_enabled(!url.is_empty(), egui::Button::new("コンタクト URL を開く")).clicked() {
                                 actions.push(Action::OpenUrl(url));
                                 ui.close();

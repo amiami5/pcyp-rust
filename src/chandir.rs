@@ -97,14 +97,108 @@ pub fn atoi(s: &str) -> i32 {
     if neg { n.wrapping_neg() } else { n }
 }
 
-/// http(s) の URL ならそのまま、それ以外は空にする。
-pub fn http_url_or_empty(s: &str) -> String {
-    if is_http_url(s) { s.to_string() } else { String::new() }
-}
-
 pub fn is_http_url(s: &str) -> bool {
     let l = s.trim_start().to_ascii_lowercase();
     l.starts_with("http://") || l.starts_with("https://")
+}
+
+/// 配信者が決めるコンタクト URL を、開いてよいものだけ残す。
+///
+/// ブラウザで開くと Sec-Fetch-Site: none になり、PeerCast などの手元のサーバーが
+/// 自分で開いたものと見分けられないので、手元や LAN を指すものは捨てる。
+pub fn contact_url_or_empty(s: &str) -> String {
+    if is_safe_contact_url(s) { s.to_string() } else { String::new() }
+}
+
+fn is_safe_contact_url(s: &str) -> bool {
+    if s.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"') {
+        return false;
+    }
+    let l = s.to_ascii_lowercase();
+    let Some(rest) = l.strip_prefix("http://").or_else(|| l.strip_prefix("https://")) else {
+        return false;
+    };
+    // ブラウザは \ も / と同じに扱う
+    let authority = &rest[..rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len())];
+    let hostport = authority.rsplit('@').next().unwrap_or("");
+    let host = if let Some(v6) = hostport.strip_prefix('[') {
+        match v6.split_once(']') {
+            Some((h, _)) => return h.parse::<std::net::Ipv6Addr>().is_ok_and(|a| is_public_v6(&a)),
+            None => return false,
+        }
+    } else {
+        hostport.split(':').next().unwrap_or("")
+    };
+    // %XX や全角の文字は、ブラウザが戻したり読み替えたりして 127.0.0.1 などになりうる
+    if host.is_empty() || !host.is_ascii() || host.contains('%') {
+        return false;
+    }
+    let host = host.trim_end_matches('.');
+    if host.is_empty() || host == "localhost" || host.ends_with(".localhost") {
+        return false;
+    }
+    match parse_browser_ipv4(host) {
+        Some(Some(a)) => is_public_v4(&a),
+        Some(None) => false,
+        None => true,
+    }
+}
+
+/// ブラウザ (WHATWG URL) と同じ読み方で IPv4 として読む。
+/// IPv4 の形でなければ None、IPv4 の形だが読めなければ Some(None)。
+/// `127.1`・`0x7f.0.0.1`・`0177.0.0.1`・`2130706433` もみな 127.0.0.1 になる。
+fn parse_browser_ipv4(host: &str) -> Option<Option<std::net::Ipv4Addr>> {
+    let parts: Vec<&str> = host.split('.').collect();
+    let last = parts.last()?;
+    let numeric = last.bytes().all(|b| b.is_ascii_digit())
+        || last.strip_prefix("0x").is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
+    if !numeric {
+        return None;
+    }
+    let num = |p: &str| -> Option<u64> {
+        if let Some(h) = p.strip_prefix("0x") {
+            if h.is_empty() { Some(0) } else { u64::from_str_radix(h, 16).ok() }
+        } else if p.len() > 1 && p.starts_with('0') {
+            u64::from_str_radix(&p[1..], 8).ok()
+        } else {
+            p.parse().ok()
+        }
+    };
+    let nums: Option<Vec<u64>> = parts.iter().map(|p| num(p)).collect();
+    let Some(nums) = nums.filter(|n| (1..=4).contains(&n.len())) else {
+        return Some(None);
+    };
+    let (init, last) = nums.split_at(nums.len() - 1);
+    if init.iter().any(|&n| n > 255) || last[0] >= 1u64 << (8 * (5 - nums.len())) {
+        return Some(None);
+    }
+    let mut v = last[0];
+    for (i, &n) in init.iter().enumerate() {
+        v += n << (8 * (3 - i));
+    }
+    Some(Some(std::net::Ipv4Addr::from(v as u32)))
+}
+
+fn is_public_v4(a: &std::net::Ipv4Addr) -> bool {
+    let o = a.octets();
+    !(o[0] == 0
+        || a.is_loopback()
+        || a.is_private()
+        || a.is_link_local()
+        || a.is_broadcast()
+        || (o[0] == 100 && (o[1] & 0xc0) == 64))
+}
+
+fn is_public_v6(a: &std::net::Ipv6Addr) -> bool {
+    if let Some(v4) = a.to_ipv4_mapped() {
+        return is_public_v4(&v4);
+    }
+    let s = a.segments();
+    // ::a.b.c.d (古い IPv4 互換の形)
+    if s[..6].iter().all(|&x| x == 0) {
+        return false;
+    }
+    !((s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80)
 }
 
 /// 32 桁の 16 進数なら大文字にして返す。それ以外は全部 0。
@@ -134,7 +228,7 @@ pub fn parse_index(text: &str, feed_url: &str) -> (Vec<Channel>, Vec<usize>) {
             name: unescape_html(f[0]),
             id: normalize_id(f[1]),
             tip: f[2].to_string(),
-            url: http_url_or_empty(f[3]),
+            url: contact_url_or_empty(f[3]),
             genre: unescape_html(f[4]),
             desc: unescape_html(f[5]),
             listeners: atoi(f[6]),
@@ -144,7 +238,7 @@ pub fn parse_index(text: &str, feed_url: &str) -> (Vec<Channel>, Vec<usize>) {
             track_artist: unescape_html(f[10]),
             track_album: unescape_html(f[11]),
             track_title: unescape_html(f[12]),
-            track_contact: http_url_or_empty(f[13]),
+            track_contact: contact_url_or_empty(f[13]),
             encoded_name: f[14].to_string(),
             uptime: f[15].to_string(),
             status: f[16].to_string(),
@@ -288,6 +382,60 @@ mod tests {
         let file = LINE.replace("http://www.example.com/", "file:///C:/Windows");
         let (c, _) = parse_index(&file, "");
         assert_eq!(c[0].url, "");
+    }
+
+    #[test]
+    fn drops_local_contact_urls() {
+        for bad in [
+            "http://127.0.0.1:7144/admin?cmd=shutdown",
+            "http://localhost:7144/",
+            "HTTP://LocalHost./",
+            "http://a.localhost/",
+            "http://user@127.0.0.1/",
+            "http://example.com@127.0.0.1/",
+            "http://127.1:7144/",
+            "http://2130706433/",
+            "http://0x7f.0.0.1/",
+            "http://0177.0.0.1/",
+            "http://0.0.0.0:7144/",
+            "http://0/",
+            "http://192.168.1.10/",
+            "http://10.0.0.1/",
+            "http://172.16.0.1/",
+            "http://169.254.169.254/",
+            "http://100.64.0.1/",
+            "http://255.255.255.255/",
+            "http://[::1]:7144/",
+            "http://[::]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[fe80::1]/",
+            "http://[fd00::1]/",
+            "http://127.0.0.%31/",
+            "http://１２７.０.０.１/",
+            "http://256.0.0.1/",
+            "http:///127.0.0.1/",
+            "http://\\127.0.0.1/",
+            "http://example.com/a b",
+            " http://example.com/",
+            "http://example.com/\"x",
+            "http://example.com/\u{7}",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(contact_url_or_empty(bad), "", "{bad}");
+        }
+        for good in [
+            "http://www.example.com/",
+            "https://example.com:8080/path?q=1#f",
+            "http://1.2.3.4/",
+            "http://8.8.8.8:7144/",
+            "http://[2001:db8::1]/",
+            "http://127.0.0.1.example.com/",
+            "http://example.com/?u=http://127.0.0.1/",
+        ] {
+            assert_eq!(contact_url_or_empty(good), good);
+        }
+        let l = LINE.replace("http://www.example.com/", "http://127.0.0.1:7144/admin?cmd=shutdown");
+        assert_eq!(parse_index(&l, "").0[0].url, "");
     }
 
     #[test]
