@@ -29,12 +29,15 @@ jobs:
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
       ZIP: pcyp-rust-${{ github.event.inputs.tag || github.ref_name }}-windows-x64.zip
-      GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+    # 書き込みのできるトークンは gh を使う step にだけ渡す
+    # (cargo test / build で動く依存クレートの build.rs などから読めないように)
     steps:
       - name: もう zip があるか確かめる (タグの push のときだけ)
         if: github.event_name == 'push'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $names = gh release view $env:TAG --json assets --jq '.assets[].name' 2>$null
           if ($LASTEXITCODE -eq 0 -and ($names -contains $env:ZIP)) {
@@ -45,6 +48,9 @@ jobs:
 
       - uses: actions/checkout@v5
         if: env.SKIP != 'true'
+        with:
+          # トークンを git の設定に残さない
+          persist-credentials: false
 
       - name: Rust の準備
         if: env.SKIP != 'true'
@@ -70,6 +76,8 @@ jobs:
       - name: リリースに添付する
         if: env.SKIP != 'true'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
