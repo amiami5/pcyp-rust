@@ -1,6 +1,6 @@
 //! YP の取得を GUI とは別のスレッドで行う。結果は共有の状態に書き、GUI はそれを読む。
 
-use crate::chandir::{Channel, parse_index};
+use crate::chandir::{BadLines, Channel, parse_index};
 use crate::config::{Config, MANUAL_INTERVAL_SEC};
 use crate::filter::{self, Filter};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -24,8 +24,8 @@ pub struct YpStatus {
     pub url: String,
     pub state: FetchState,
     pub channels: Vec<Channel>,
-    /// 解析できなかった行の番号
-    pub bad_lines: Vec<usize>,
+    /// 解析できなかった行
+    pub bad_lines: BadLines,
     pub updated: Option<String>,
 }
 
@@ -112,7 +112,7 @@ pub fn sync_yps(shared: &mut Shared, cfg: &Config) {
             url: e.url.clone(),
             state: FetchState::Idle,
             channels: Vec::new(),
-            bad_lines: Vec::new(),
+            bad_lines: BadLines::default(),
             updated: None,
         });
         y.name = e.name.clone();
@@ -199,7 +199,7 @@ impl Worker {
                             let msg = if bad.is_empty() {
                                 (false, format!("{}: {} チャンネル", name, chans.len()))
                             } else {
-                                (true, format!("{}: {} チャンネル、解析できない行 {:?}", name, chans.len(), bad))
+                                (true, format!("{}: {} チャンネル、{}", name, chans.len(), bad.describe()))
                             };
                             if let Some(y) = s.yps.iter_mut().find(|y| &y.url == url) {
                                 y.channels = chans;

@@ -210,21 +210,82 @@ fn normalize_id(s: &str) -> String {
     }
 }
 
-/// 解析できた行と、解析できなかった行の番号 (1 から数える)。
-pub fn parse_index(text: &str, feed_url: &str) -> (Vec<Channel>, Vec<usize>) {
-    let (mut chans, mut errors) = (Vec::new(), Vec::new());
+/// 1 つの欄の長さの上限 (バイト)。超えた分は捨てる。
+pub const MAX_FIELD_BYTES: usize = 1024;
+/// チャンネルの数の上限。超えた行は読まない。
+pub const MAX_CHANNELS: usize = 3000;
+/// 解析できない行の番号を、最初から何個まで覚えておくか。
+pub const MAX_BAD_SHOWN: usize = 5;
+
+/// 解析できなかった行。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BadLines {
+    /// 解析できなかった行の数
+    pub count: usize,
+    /// 最初の何個かの行番号 (1 から数える)
+    pub first: Vec<usize>,
+    /// チャンネルの数が上限を超えて、読まなかった行の数
+    pub skipped: usize,
+}
+
+impl BadLines {
+    pub fn is_empty(&self) -> bool {
+        self.count == 0 && self.skipped == 0
+    }
+
+    /// ログに出す短い説明。
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if self.count > 0 {
+            let nums: Vec<String> = self.first.iter().map(usize::to_string).collect();
+            let more = if self.count > self.first.len() { ", …" } else { "" };
+            parts.push(format!("解析できない行 {} 行 ({}{})", self.count, nums.join(", "), more));
+        }
+        if self.skipped > 0 {
+            parts.push(format!("{} チャンネルを超えた {} 行は読みません", MAX_CHANNELS, self.skipped));
+        }
+        parts.join("、")
+    }
+
+    fn push(&mut self, line_no: usize) {
+        self.count += 1;
+        if self.first.len() < MAX_BAD_SHOWN {
+            self.first.push(line_no);
+        }
+    }
+}
+
+/// 長すぎる欄を、文字の切れ目で切る。
+fn clip(s: &str) -> &str {
+    if s.len() <= MAX_FIELD_BYTES {
+        return s;
+    }
+    let mut end = MAX_FIELD_BYTES;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// 解析できた行と、解析できなかった行。
+pub fn parse_index(text: &str, feed_url: &str) -> (Vec<Channel>, BadLines) {
+    let (mut chans, mut bad) = (Vec::new(), BadLines::default());
     if text.is_empty() {
-        return (chans, errors);
+        return (chans, bad);
     }
     let body = text.strip_suffix('\n').unwrap_or(text);
     for (i, line) in body.split('\n').enumerate() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let f: Vec<&str> = line.split("<>").collect();
-        if f.len() != NUM_FIELDS {
-            errors.push(i + 1);
+        if chans.len() >= MAX_CHANNELS {
+            bad.skipped += 1;
             continue;
         }
-        chans.push(Channel {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let f: Vec<&str> = line.splitn(NUM_FIELDS + 1, "<>").map(clip).collect();
+        if f.len() != NUM_FIELDS {
+            bad.push(i + 1);
+            continue;
+        }
+    chans.push(Channel {
             name: unescape_html(f[0]),
             id: normalize_id(f[1]),
             tip: f[2].to_string(),
@@ -249,7 +310,7 @@ pub fn parse_index(text: &str, feed_url: &str) -> (Vec<Channel>, Vec<usize>) {
     }
     // 聴取者の多い順 (同じ数なら元の順)
     chans.sort_by_key(|c| std::cmp::Reverse(c.listeners));
-    (chans, errors)
+    (chans, bad)
 }
 
 /// `feed_url` の最後の `/` の手前に `<file>?cn=<encoded name>` を付けた URL。
@@ -377,11 +438,37 @@ mod tests {
         let text = format!("{}\r\nbroken<>line\n{}\nfile<>x\n", LINE, bad);
         let (c, e) = parse_index(&text, "http://yp/index.txt");
         assert_eq!(c.len(), 2);
-        assert_eq!(e, vec![2, 4]);
+        assert_eq!(e, BadLines { count: 2, first: vec![2, 4], skipped: 0 });
         assert!(c.iter().any(|c| c.url.is_empty()));
         let file = LINE.replace("http://www.example.com/", "file:///C:/Windows");
         let (c, _) = parse_index(&file, "");
         assert_eq!(c[0].url, "");
+    }
+
+    #[test]
+    fn caps_bad_lines_fields_and_channels() {
+        let (c, e) = parse_index(&"
+".repeat(100_000), "");
+        assert!(c.is_empty());
+        assert_eq!(e.count, 100_000);
+        assert_eq!(e.first, vec![1, 2, 3, 4, 5]);
+        assert!(e.describe().len() < 100, "{}", e.describe());
+
+        let long = LINE.replacen("予定地", &"あ".repeat(10_000), 1);
+        let (c, _) = parse_index(&long, "");
+        assert!(c[0].name.len() <= MAX_FIELD_BYTES && c[0].name.starts_with("あ"));
+
+        let text = format!("{}
+", LINE).repeat(MAX_CHANNELS + 10);
+        let (c, e) = parse_index(&text, "");
+        assert_eq!(c.len(), MAX_CHANNELS);
+        assert_eq!((e.count, e.skipped), (0, 10));
+        assert!(!e.is_empty());
+
+        // "<>" が多すぎる行は解析できない行
+        let (c, e) = parse_index(&format!("{}<>x", LINE), "");
+        assert!(c.is_empty());
+        assert_eq!(e.count, 1);
     }
 
     #[test]
@@ -442,7 +529,7 @@ mod tests {
     fn empty_and_no_trailing_newline() {
         assert_eq!(parse_index("", "").0.len(), 0);
         assert_eq!(parse_index(LINE, "").0.len(), 1);
-        assert_eq!(parse_index(&format!("{}\n", LINE), "").1.len(), 0);
+        assert_eq!(parse_index(&format!("{}\n", LINE), "").1.count, 0);
     }
 
     #[test]

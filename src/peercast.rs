@@ -103,7 +103,7 @@ impl Rpc {
         if status != 200 {
             return Err(format!("HTTP {}", status));
         }
-        let text = resp.body_mut().with_config().limit(8 * 1024 * 1024).read_to_string().map_err(|e| e.to_string())?;
+        let text = crate::fetch::read_body_string(&mut resp, 8 * 1024 * 1024)?;
         let v: Value = serde_json::from_str(&text).map_err(|e| format!("応答を読めません: {}", e))?;
         if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
             let msg = err.get("message").and_then(Value::as_str).unwrap_or("不明なエラー");
@@ -123,7 +123,7 @@ impl Rpc {
         if resp.status().as_u16() != 200 {
             return Err(format!("HTTP {}", resp.status()));
         }
-        let text = resp.body_mut().with_config().limit(1024 * 1024).read_to_string().map_err(|e| e.to_string())?;
+        let text = crate::fetch::read_body_string(&mut resp, 1024 * 1024)?;
         let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         let v = v.get("result").cloned().unwrap_or(v);
         if v.get("agentName").is_none() {
