@@ -58,7 +58,9 @@ pub struct Rpc {
 
 impl Rpc {
     pub fn new(cfg: &PeerCastConfig) -> Rpc {
+        // 転送には付いていかない (Authorization や ?pass= を別のところへ送らないため)
         let config = ureq::Agent::config_builder()
+            .max_redirects(0)
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(5)))
             .user_agent(crate::fetch::USER_AGENT)
