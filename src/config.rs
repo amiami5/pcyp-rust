@@ -72,7 +72,7 @@ pub struct PeerCastConfig {
     /// ファイルには Windows の DPAPI で暗号にして書く (今のユーザーでだけ戻せる)
     #[serde(with = "secret")]
     pub password: String,
-    /// PeerCast 本体の exe。空なら起動しない。
+    /// `PeerCast` 本体の exe。空なら起動しない。
     pub exe_path: String,
     pub launch_on_start: bool,
     pub url_kind: PlayUrlKind,
@@ -83,7 +83,7 @@ pub struct PeerCastConfig {
 impl Default for PeerCastConfig {
     fn default() -> Self {
         PeerCastConfig {
-            address: format!("127.0.0.1:{}", DEFAULT_PEERCAST_PORT),
+            address: format!("127.0.0.1:{DEFAULT_PEERCAST_PORT}"),
             user: String::new(),
             password: String::new(),
             exe_path: String::new(),
@@ -132,17 +132,17 @@ pub fn parse_address(s: &str) -> Result<(String, u16), String> {
 
 impl PeerCastConfig {
     pub fn host(&self) -> String {
-        parse_address(&self.address).map(|a| a.0).unwrap_or_else(|_| "127.0.0.1".into())
+        parse_address(&self.address).map_or_else(|_| "127.0.0.1".into(), |a| a.0)
     }
 
     pub fn port(&self) -> u16 {
-        parse_address(&self.address).map(|a| a.1).unwrap_or(DEFAULT_PEERCAST_PORT)
+        parse_address(&self.address).map_or(DEFAULT_PEERCAST_PORT, |a| a.1)
     }
 
     /// `http://ホスト:ポート` (IPv6 は角かっこで囲む)
     pub fn base_url(&self) -> String {
         let h = self.host();
-        let h = if h.contains(':') { format!("[{}]", h) } else { h };
+        let h = if h.contains(':') { format!("[{h}]") } else { h };
         format!("http://{}:{}", h, self.port())
     }
 }
@@ -270,6 +270,20 @@ impl Default for Columns {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
+pub struct PinnedTabs {
+    pub favorite: bool,
+    pub all: bool,
+    pub new: bool,
+}
+
+impl Default for PinnedTabs {
+    fn default() -> Self {
+        PinnedTabs { favorite: true, all: true, new: true }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct ViewConfig {
     /// pcyplite のような 2 行表示
     pub two_line: bool,
@@ -283,6 +297,10 @@ pub struct ViewConfig {
     pub show_info_rows: bool,
     /// 無視のタブを出さない
     pub hide_ignored_tab: bool,
+    /// 新着のタブを出さない
+    pub hide_new_tab: bool,
+    /// タブの帯でスクロールさせず、左に置いておくタブ
+    pub pinned_tabs: PinnedTabs,
     /// マウスのホイール 1 目盛りで一覧を何行進めるか
     pub scroll_rows: u32,
     /// 一覧で省略された文字に、カーソルを合わせたとき全文を出す
@@ -315,12 +333,14 @@ impl Default for ViewConfig {
             columns: Columns::default(),
             show_info_rows: true,
             hide_ignored_tab: true,
+            hide_new_tab: false,
+            pinned_tabs: PinnedTabs::default(),
             scroll_rows: 2,
             show_tooltips: false,
             show_countdown: true,
-            column_widths: Default::default(),
+            column_widths: std::collections::BTreeMap::default(),
             window_rect: None,
-            sub_windows: Default::default(),
+            sub_windows: std::collections::BTreeMap::default(),
             sort_key: "listeners".into(),
             sort_desc: true,
             favorites_first: false,
@@ -371,7 +391,7 @@ impl Default for Config {
 
 impl Config {
     pub fn update_interval_sec(&self) -> u64 {
-        self.update_interval_min.max(MIN_AUTO_INTERVAL_MIN) as u64 * 60
+        u64::from(self.update_interval_min.max(MIN_AUTO_INTERVAL_MIN)) * 60
     }
 }
 
@@ -379,7 +399,7 @@ impl Config {
 pub fn base_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -405,7 +425,7 @@ fn broken_path(path: &Path) -> PathBuf {
     let p = sibling(path, &format!(".broken-{}", crate::win::now_stamp()));
     // 同じ秒に 2 回退避しても上書きしない
     (0..)
-        .map(|i| if i == 0 { p.clone() } else { sibling(&p, &format!("-{}", i)) })
+        .map(|i| if i == 0 { p.clone() } else { sibling(&p, &format!("-{i}")) })
         .find(|p| !p.exists())
         .unwrap()
 }
@@ -428,11 +448,11 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> ReadResult<T> {
                 let s = s.strip_prefix('\u{feff}').unwrap_or(&s);
                 return match serde_json::from_str(s) {
                     Ok(v) => ReadResult::Ok(v),
-                    Err(e) => ReadResult::Bad(format!("中身を読めません: {}", e)),
+                    Err(e) => ReadResult::Bad(format!("中身を読めません: {e}")),
                 };
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ReadResult::Missing,
-            Err(e) => last_err = format!("開けません: {}", e),
+            Err(e) => last_err = format!("開けません: {e}"),
         }
     }
     ReadResult::Bad(last_err)
@@ -458,7 +478,7 @@ pub fn load_json_at<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Load
                     broken.file_name().unwrap_or_default().to_string_lossy(),
                     e
                 )),
-                Err(re) => notices.push(format!("{} を読めません ({})。退避もできませんでした: {}", name, e, re)),
+                Err(re) => notices.push(format!("{name} を読めません ({e})。退避もできませんでした: {re}")),
             }
         }
     }
@@ -467,17 +487,17 @@ pub fn load_json_at<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Load
         ReadResult::Ok(v) => {
             // notices が空なら、本体は読めなかったのではなく、なかった
             let why = if notices.is_empty() { "がなかったので" } else { "は" };
-            notices.push(format!("{} {}、1 つ前に保存した控え ({}.bak) から読みました", name, why, name));
+            notices.push(format!("{name} {why}、1 つ前に保存した控え ({name}.bak) から読みました"));
             Loaded { value: v, notices }
         }
         ReadResult::Missing => {
             if !notices.is_empty() {
-                notices.push(format!("{} は初期値にしました", name));
+                notices.push(format!("{name} は初期値にしました"));
             }
             Loaded { value: T::default(), notices }
         }
         ReadResult::Bad(e) => {
-            notices.push(format!("{}.bak も読めないので ({})、{} は初期値にしました", name, e, name));
+            notices.push(format!("{name}.bak も読めないので ({e})、{name} は初期値にしました"));
             Loaded { value: T::default(), notices }
         }
     }
@@ -540,7 +560,11 @@ mod secret {
             return String::new();
         }
         match crypt(v.as_bytes(), true) {
-            Some(b) => format!("{}{}", PREFIX, b.iter().map(|x| format!("{:02x}", x)).collect::<String>()),
+            Some(b) => b.iter().fold(PREFIX.to_string(), |mut s, x| {
+                use std::fmt::Write as _;
+                let _ = write!(s, "{x:02x}");
+                s
+            }),
             // 暗号にできなければ、パスワードを失うよりは平文で残す
             None => v.to_string(),
         }
@@ -563,21 +587,20 @@ mod secret {
     fn crypt(data: &[u8], encrypt: bool) -> Option<Vec<u8>> {
         use windows_sys::Win32::Foundation::LocalFree;
         use windows_sys::Win32::Security::Cryptography::*;
-        let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
+        let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr().cast_mut() };
         let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
-        let null = std::ptr::null();
         let ok = unsafe {
             if encrypt {
-                CryptProtectData(&input, null as _, null as _, null, null as _, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+                CryptProtectData(&raw const input, std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &raw mut out)
             } else {
-                CryptUnprotectData(&input, std::ptr::null_mut(), null as _, null, null as _, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+                CryptUnprotectData(&raw const input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &raw mut out)
             }
         };
         if ok == 0 || out.pbData.is_null() {
             return None;
         }
         let v = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec() };
-        unsafe { LocalFree(out.pbData as _) };
+        unsafe { LocalFree(out.pbData.cast()) };
         Some(v)
     }
 

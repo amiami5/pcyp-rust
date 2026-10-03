@@ -1,11 +1,11 @@
-//! ローカルの PeerCast (PeerCast YT / PeerCastStation) との連携。
+//! ローカルの `PeerCast` (`PeerCast` YT / `PeerCastStation`) との連携。
 
 use crate::config::PeerCastConfig;
 use serde_json::{Value, json};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-/// PeerCast が待ち受けているか (TCP でつながるか)。
+/// `PeerCast` が待ち受けているか (TCP でつながるか)。
 pub fn is_running(cfg: &PeerCastConfig) -> bool {
     let Ok(addrs) = (cfg.host().as_str(), cfg.port()).to_socket_addrs() else {
         return false;
@@ -18,7 +18,7 @@ pub fn admin_url(cfg: &PeerCastConfig) -> String {
     format!("{}/", cfg.base_url())
 }
 
-/// PeerCast の exe を起動する (すでに動いていれば何もしない)。
+/// `PeerCast` の exe を起動する (すでに動いていれば何もしない)。
 pub fn launch(cfg: &PeerCastConfig) -> Result<bool, String> {
     if cfg.exe_path.trim().is_empty() || is_running(cfg) {
         return Ok(false);
@@ -36,7 +36,7 @@ fn base64(input: &[u8]) -> String {
     let mut out = String::new();
     for chunk in input.chunks(3) {
         let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
         for i in 0..4 {
             if i <= chunk.len() {
                 out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
@@ -99,24 +99,24 @@ impl Rpc {
         let status = resp.status().as_u16();
         if status == 401 || status == 403 {
             return Err(if self.has_password {
-                format!("認証に失敗しました (HTTP {})。ユーザー名とパスワードを確かめてください", status)
+                format!("認証に失敗しました (HTTP {status})。ユーザー名とパスワードを確かめてください")
             } else {
-                format!("PeerCast がログインを求めています (HTTP {})。localhost 以外の PeerCast でこの操作をするには、PeerCast の管理画面のパスワードを設定の PeerCast タブに入れてください (一覧の取得と再生には要りません)", status)
+                format!("PeerCast がログインを求めています (HTTP {status})。localhost 以外の PeerCast でこの操作をするには、PeerCast の管理画面のパスワードを設定の PeerCast タブに入れてください (一覧の取得と再生には要りません)")
             });
         }
         if status != 200 {
-            return Err(format!("HTTP {}", status));
+            return Err(format!("HTTP {status}"));
         }
         let text = crate::fetch::read_body_string(&mut resp, 8 * 1024 * 1024)?;
-        let v: Value = serde_json::from_str(&text).map_err(|e| format!("応答を読めません: {}", e))?;
+        let v: Value = serde_json::from_str(&text).map_err(|e| format!("応答を読めません: {e}"))?;
         if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
             let msg = err.get("message").and_then(Value::as_str).unwrap_or("不明なエラー");
-            return Err(format!("{}: {}", method, msg));
+            return Err(format!("{method}: {msg}"));
         }
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
     }
 
-    /// PeerCast YT は `GET /api/1` に認証なしで getVersionInfo の結果を返す (LAN からでも)。
+    /// `PeerCast` YT は `GET /api/1` に認証なしで getVersionInfo の結果を返す (LAN からでも)。
     /// POST の JSON-RPC は localhost 以外からだとログインが要るので、まず GET で聞く。
     /// この GET にはパスワードを付けない (見張りで 10 秒ごとに呼ぶので)。答えなければ POST で聞き直す。
     fn get_version(&self) -> Result<Value, String> {
@@ -162,10 +162,10 @@ pub struct VersionInfo {
     pub kind: PeerCastKind,
 }
 
-/// 接続した PeerCast の種類 (getVersionInfo の agentName から見分ける)
+/// 接続した `PeerCast` の種類 (getVersionInfo の agentName から見分ける)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerCastKind {
-    /// PeerCast YT (C++ 版と Rust 版)
+    /// `PeerCast` YT (C++ 版と Rust 版)
     PeerCastYt,
     PeerCastStation,
     Unknown,
@@ -191,7 +191,7 @@ pub fn detect_kind(agent: &str) -> PeerCastKind {
     }
 }
 
-/// PeerCast がつないでいるチャンネル (`getChannels` の 1 件)。
+/// `PeerCast` がつないでいるチャンネル (`getChannels` の 1 件)。
 #[derive(Clone, Debug, Default)]
 pub struct RelayChannel {
     pub id: String,
@@ -271,9 +271,9 @@ mod tests {
         assert_eq!((c.listeners, c.relays, c.bitrate), (2, 1, 500));
     }
 
-    /// 実際の PeerCast につなぐテスト。`PCYP_TEST_PEERCAST=ホスト:ポート cargo test -- --ignored` で動かす。
+    /// 実際の `PeerCast` につなぐテスト。`PCYP_TEST_PEERCAST=ホスト:ポート cargo test -- --ignored` で動かす。
     #[test]
-    #[ignore]
+    #[ignore = "実際の PeerCast がいる"]
     fn live_peercast() {
         let Ok(address) = std::env::var("PCYP_TEST_PEERCAST") else {
             eprintln!("PCYP_TEST_PEERCAST が未設定なので飛ばします");
@@ -290,10 +290,10 @@ mod tests {
         let chans = match rpc.channels() {
             Ok(c) => c,
             Err(e) if password.is_empty() => {
-                eprintln!("getChannels (パスワードなし): {}", e);
+                eprintln!("getChannels (パスワードなし): {e}");
                 return;
             }
-            Err(e) => panic!("getChannels: {}", e),
+            Err(e) => panic!("getChannels: {e}"),
         };
         eprintln!("channels: {}", chans.len());
         for c in &chans {
@@ -301,6 +301,6 @@ mod tests {
         }
         // ない ID の停止はエラーになるか、何もしないで終わる。どちらでも応答は返る
         let r = rpc.stop_channel("00000000000000000000000000000001");
-        eprintln!("stopChannel(dummy): {:?}", r);
+        eprintln!("stopChannel(dummy): {r:?}");
     }
 }

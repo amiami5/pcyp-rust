@@ -13,6 +13,7 @@ use crate::worker::{Command, FetchState, SharedRef, lock};
 use eframe::egui::{self, Align, Color32, FontFamily, Key, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
@@ -349,7 +350,7 @@ struct PcStatus {
     agent: String,
 }
 
-/// 再生を始めてから、プレイヤーの窓が出るか PeerCast が受信し始めるまでを見張る長さ
+/// 再生を始めてから、プレイヤーの窓が出るか `PeerCast` が受信し始めるまでを見張る長さ
 const PLAY_WATCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 見張りの終わり方
@@ -357,7 +358,7 @@ const PLAY_WATCH_TIMEOUT: Duration = Duration::from_secs(60);
 enum PlayOutcome {
     /// プレイヤーの窓が出た (かかった時間)
     Opened(Duration),
-    /// PeerCast が受信し始めた (かかった時間)。窓は見つからなかった
+    /// `PeerCast` が受信し始めた (かかった時間)。窓は見つからなかった
     Receiving(Duration),
     /// 待っても窓が出ず、受信にもならなかった
     TimedOut(Duration),
@@ -366,15 +367,15 @@ enum PlayOutcome {
     Unknown,
 }
 
-/// 再生を始めたチャンネルの、プレイヤーと PeerCast の様子 (右下に出す)
+/// 再生を始めたチャンネルの、プレイヤーと `PeerCast` の様子 (右下に出す)
 #[derive(Clone)]
 struct PlayWatch {
     id: String,
     name: String,
     started: Instant,
-    /// getChannels の status。まだ PeerCast の一覧にないなら空
+    /// getChannels の status。まだ `PeerCast` の一覧にないなら空
     status: String,
-    /// PeerCast に問い合わせられなかったときの理由 (別の PC の PeerCast はパスワードがないと断る)
+    /// `PeerCast` に問い合わせられなかったときの理由 (別の PC の `PeerCast` はパスワードがないと断る)
     error: String,
     /// 見張りが終わったら、その終わり方
     result: Option<PlayOutcome>,
@@ -397,7 +398,7 @@ impl PlayWatch {
 
 /// 見ているのが `started` の再生のままなら `f` で書き換える。新しい再生に替わっていたら false
 fn with_watch(watch: &Mutex<Option<PlayWatch>>, started: Instant, f: impl FnOnce(&mut PlayWatch)) -> bool {
-    let mut w = watch.lock().unwrap_or_else(|e| e.into_inner());
+    let mut w = watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match w.as_mut() {
         Some(w) if w.started == started => {
             f(w);
@@ -428,6 +429,7 @@ pub struct App {
     notices: Vec<String>,
 
     tab: Tab,
+    tab_bar: TabBar,
     search: String,
     sort: (SortKey, bool),
     /// お気に入りを上にまとめる
@@ -470,8 +472,22 @@ pub struct App {
     first_frame: bool,
 }
 
+/// タブの帯の横スクロール。入りきらないときは両端に ◀ ▶ を出し、選んだタブが隠れないように動かす
+#[derive(Default)]
+struct TabBar {
+    /// 次の描画で付けるスクロール位置
+    goto: Option<f32>,
+    /// 前の描画でのスクロール位置と、その最大
+    offset: f32,
+    max_offset: f32,
+    /// 前の描画でタブが入りきらなかった (◀ ▶ を出す)
+    overflow: bool,
+    /// 選んだタブを見えるようにしたときの (タブ, 帯の幅)。どちらかが変わったらまた見えるようにする
+    revealed: Option<(Tab, f32)>,
+}
+
 fn read<T: Clone>(l: &RwLock<T>) -> T {
-    l.read().unwrap_or_else(|e| e.into_inner()).clone()
+    l.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
 fn color_of(colors: &[[u8; 3]]) -> Option<Color32> {
@@ -479,7 +495,7 @@ fn color_of(colors: &[[u8; 3]]) -> Option<Color32> {
         return None;
     }
     let n = colors.len() as u32;
-    let sum = colors.iter().fold([0u32; 3], |a, c| [a[0] + c[0] as u32, a[1] + c[1] as u32, a[2] + c[2] as u32]);
+    let sum = colors.iter().fold([0u32; 3], |a, c| [a[0] + u32::from(c[0]), a[1] + u32::from(c[1]), a[2] + u32::from(c[2])]);
     Some(Color32::from_rgba_unmultiplied((sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8, 130))
 }
 
@@ -515,6 +531,7 @@ impl App {
             has_bold: init.has_bold,
             notices: init.notices,
             tab: Tab::All,
+            tab_bar: TabBar::default(),
             search: String::new(),
             sort: (SortKey::from_key(&cfg.view.sort_key), cfg.view.sort_desc),
             fav_first: cfg.view.favorites_first,
@@ -574,7 +591,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// PeerCast の起動 (設定されていれば) と、動いているかの定期的な確認。
+    /// `PeerCast` の起動 (設定されていれば) と、動いているかの定期的な確認。
     fn start_peercast_monitor(&self, ctx: egui::Context, cfg: &Config) {
         if cfg.peercast.launch_on_start {
             match peercast::launch(&cfg.peercast) {
@@ -593,7 +610,7 @@ impl App {
                     let agent = if running { Rpc::new(&pc).version_info().map(|v| v.agent).unwrap_or_default() } else { String::new() };
                     // ステータスバーの表示が変わるときだけ描き直す
                     let changed = {
-                        let mut s = status.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut s = status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         let changed = s.running != running || s.agent != agent;
                         s.running = running;
                         s.agent = agent;
@@ -751,7 +768,7 @@ impl App {
         let cfg = self.cfg();
         match player::play(&cfg, ch) {
             Ok((cmd, pid)) => {
-                self.log(false, format!("再生: {}", cmd));
+                self.log(false, format!("再生: {cmd}"));
                 history::record_play(&self.shared, &cfg, ch);
                 self.watch_play(ch, pid);
             }
@@ -765,7 +782,7 @@ impl App {
     fn watch_play(&self, ch: &Channel, pid: u32) {
         let started = Instant::now();
         let id = ch.id.to_ascii_uppercase();
-        *self.play_watch.lock().unwrap_or_else(|e| e.into_inner()) = Some(PlayWatch {
+        *self.play_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(PlayWatch {
             id: id.clone(),
             name: ch.name.clone(),
             started,
@@ -822,7 +839,7 @@ impl App {
             // 結果をしばらく出してから消す
             let keep = if let PlayOutcome::TimedOut(_) = outcome { 20 } else { 5 };
             std::thread::sleep(Duration::from_secs(keep));
-            let mut w = watch.lock().unwrap_or_else(|e| e.into_inner());
+            let mut w = watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if w.as_ref().is_some_and(|w| w.started == started) {
                 *w = None;
             }
@@ -848,7 +865,7 @@ impl App {
                 Ok(Some(r)) if r.is_newer() => s.log(false, format!("新しい版 {} が出ています", r.tag)),
                 Ok(_) if manual => s.log(false, concat!("今の版 (v", env!("CARGO_PKG_VERSION"), ") が最新です")),
                 Ok(_) => {}
-                Err(e) => s.log(true, format!("新しい版があるか確かめられませんでした: {}", e)),
+                Err(e) => s.log(true, format!("新しい版があるか確かめられませんでした: {e}")),
             }
             drop(s);
             ctx.request_repaint();
@@ -856,7 +873,7 @@ impl App {
     }
 
     fn save_filters(&mut self, filters: Vec<Filter>) {
-        *self.filters.write().unwrap_or_else(|e| e.into_inner()) = filters.clone();
+        self.filters.write().unwrap_or_else(std::sync::PoisonError::into_inner).clone_from(&filters);
         if let Err(e) = config::save_json(config::FILTER_FILE, &Filters(filters)) {
             self.log(true, e);
         }
@@ -866,7 +883,7 @@ impl App {
     fn apply_config(&mut self, ctx: &egui::Context, mut new: Config) {
         // 列の幅は画面で持っているものが正しい (設定の画面を開いた時点の古い値で上書きしない)
         new.view.column_widths = self.col_widths.clone();
-        *self.config.write().unwrap_or_else(|e| e.into_inner()) = new.clone();
+        *self.config.write().unwrap_or_else(std::sync::PoisonError::into_inner) = new.clone();
         if let Err(e) = config::save_json(config::CONFIG_FILE, &new) {
             self.log(true, e);
         }
@@ -888,18 +905,18 @@ impl App {
             let r = f(&Rpc::new(&pc));
             let mut s = lock(&shared);
             match r {
-                Ok(()) => s.log(false, format!("PeerCast: {}しました", what)),
-                Err(e) => s.log(true, format!("PeerCast: {}できません: {}", what, e)),
+                Ok(()) => s.log(false, format!("PeerCast: {what}しました")),
+                Err(e) => s.log(true, format!("PeerCast: {what}できません: {e}")),
             }
             drop(s);
-            relay_dirty.lock().unwrap_or_else(|e| e.into_inner()).loading = false;
+            relay_dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner).loading = false;
             win::request_repaint();
         });
     }
 
     fn load_relays(&mut self) {
         {
-            let mut r = self.relay.lock().unwrap_or_else(|e| e.into_inner());
+            let mut r = self.relay.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if r.loading {
                 return;
             }
@@ -910,7 +927,7 @@ impl App {
         let relay = self.relay.clone();
         std::thread::spawn(move || {
             let res = Rpc::new(&pc).channels();
-            let mut r = relay.lock().unwrap_or_else(|e| e.into_inner());
+            let mut r = relay.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             r.loading = false;
             match res {
                 Ok(c) => {
@@ -982,7 +999,7 @@ impl App {
         };
         ui.horizontal(|ui| {
             let r = ui.add_enabled(!fetching && wait == 0, egui::Button::new(if fetching { "⟳ 取得中…" } else { "⟳ 更新" }));
-            let r = if wait > 0 { r.on_disabled_hover_text(format!("あと {} 秒で更新できます", wait)) } else { r.on_hover_text("すべての YP を更新 (F5)") };
+            let r = if wait > 0 { r.on_disabled_hover_text(format!("あと {wait} 秒で更新できます")) } else { r.on_hover_text("すべての YP を更新 (F5)") };
             if r.clicked() {
                 self.refresh();
             }
@@ -1078,7 +1095,7 @@ impl App {
             ui.menu_button("列で並べ替え", |ui| {
                 for (k, label) in SortKey::COLUMNS {
                     let mark = if self.sort.0 == k { if self.sort.1 { " ▼" } else { " ▲" } } else { "" };
-                    if ui.button(format!("{}{}", label, mark)).clicked() {
+                    if ui.button(format!("{label}{mark}")).clicked() {
                         self.set_sort(k);
                         ui.close();
                     }
@@ -1092,35 +1109,116 @@ impl App {
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui, cfg: &Config) {
-        let yps: Vec<(String, String, FetchState)> =
-            lock(&self.shared).yps.iter().map(|y| (y.name.clone(), y.url.clone(), y.state.clone())).collect();
-        egui::ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let c = &self.counts;
-                let mut tab = self.tab.clone();
-                ui.selectable_value(&mut tab, Tab::Favorite, format!("★ お気に入り ({})", c.favorite));
-                ui.selectable_value(&mut tab, Tab::All, format!("すべて ({})", c.all));
-                ui.selectable_value(&mut tab, Tab::New, format!("🆕 新着 ({})", c.new))
-                    .on_hover_text("新しく始まったチャンネル (NEW の印が付いているもの)");
-                for (i, (name, url, state)) in yps.iter().enumerate() {
-                    let n = c.per_yp.get(i).copied().unwrap_or(0);
-                    let (label, tip) = match state {
-                        FetchState::Error(e) => (RichText::new(format!("⚠ {} ({})", name, n)).color(Color32::from_rgb(220, 60, 60)), e.clone()),
-                        FetchState::Loading => (RichText::new(format!("{} …", name)), "取得中".to_string()),
-                        _ => (RichText::new(format!("{} ({})", name, n)), url.clone()),
-                    };
-                    let r = ui.selectable_label(tab == Tab::Yp(url.clone()), label).on_hover_text(tip);
-                    if r.clicked() {
-                        tab = Tab::Yp(url.clone());
+        let c = &self.counts;
+        let pin = &cfg.view.pinned_tabs;
+        // (タブ, 見出し, カーソルを合わせたときの説明, 左に置いておく)
+        let mut tabs: Vec<(Tab, RichText, Option<String>, bool)> = vec![
+            (Tab::Favorite, RichText::new(format!("★ お気に入り ({})", c.favorite)), None, pin.favorite),
+            (Tab::All, RichText::new(format!("すべて ({})", c.all)), None, pin.all),
+        ];
+        if !cfg.view.hide_new_tab {
+            tabs.push((Tab::New, RichText::new(format!("🆕 新着 ({})", c.new)), Some("新しく始まったチャンネル (NEW の印が付いているもの)".into()), pin.new));
+        }
+        for (i, y) in lock(&self.shared).yps.iter().enumerate() {
+            let n = c.per_yp.get(i).copied().unwrap_or(0);
+            let (label, tip) = match &y.state {
+                FetchState::Error(e) => (RichText::new(format!("⚠ {} ({})", y.name, n)).color(Color32::from_rgb(220, 60, 60)), e.clone()),
+                FetchState::Loading => (RichText::new(format!("{} …", y.name)), "取得中".to_string()),
+                _ => (RichText::new(format!("{} ({})", y.name, n)), y.url.clone()),
+            };
+            tabs.push((Tab::Yp(y.url.clone()), label, Some(tip), false));
+        }
+        if !cfg.view.hide_ignored_tab {
+            tabs.push((Tab::Ignored, RichText::new(format!("🚫 無視 ({})", c.ignored)), None, false));
+        }
+        let tab_button = |ui: &mut egui::Ui, tab: &mut Tab, (t, label, tip, _): &(Tab, RichText, Option<String>, bool)| {
+            let mut r = ui.selectable_label(tab == t, label.clone());
+            if let Some(tip) = tip {
+                r = r.on_hover_text(tip);
+            }
+            if r.clicked() {
+                *tab = t.clone();
+            }
+            r
+        };
+        let bar = &mut self.tab_bar;
+        let arrow = egui::vec2(ui.spacing().interact_size.y, ui.spacing().interact_size.y);
+        // ◀ ▶ の 2 つ分の幅
+        let arrows_w = 2.0 * (arrow.x + ui.spacing().item_spacing.x);
+        let page = |bar: &TabBar, w: f32, dir: f32| (bar.offset + dir * (w * 0.8).max(40.0)).clamp(0.0, bar.max_offset);
+        // この描画で選ばれているタブ (クリックで変わるのは次の描画から)
+        let shown = self.tab.clone();
+        let mut tab = self.tab.clone();
+        ui.horizontal(|ui| {
+            let mut pinned = tabs.iter().filter(|t| t.3).peekable();
+            if pinned.peek().is_some() {
+                for t in pinned {
+                    tab_button(ui, &mut tab, t);
+                }
+                ui.separator();
+            }
+            // 上の段が窓に入りきらないと available_width は窓より広くなるので、見えている所までにする
+            let full_w = ui.available_width().min(ui.clip_rect().right() - ui.cursor().left());
+            let area_w = if bar.overflow { full_w - arrows_w } else { full_w };
+            if bar.overflow
+                && ui.add_enabled(bar.offset > 0.5, egui::Button::new("◀").min_size(arrow)).clicked()
+            {
+                bar.goto = Some(page(bar, area_w, -1.0));
+            }
+            let mut area = egui::ScrollArea::horizontal().id_salt("tabs").max_width(area_w);
+            if let Some(x) = bar.goto.take() {
+                area = area.horizontal_scroll_offset(x);
+            }
+            let out = area.show(ui, |ui| {
+                // 中身の左端。タブの位置はここからの距離で返す
+                let left = ui.max_rect().left();
+                let mut sel_x = None;
+                ui.horizontal(|ui| {
+                    for t in tabs.iter().filter(|t| !t.3) {
+                        let r = tab_button(ui, &mut tab, t);
+                        if t.0 == shown {
+                            sel_x = Some((r.rect.left() - left, r.rect.right() - left));
+                        }
                     }
-                }
-                if !cfg.view.hide_ignored_tab {
-                    ui.selectable_value(&mut tab, Tab::Ignored, format!("🚫 無視 ({})", c.ignored));
-                }
-                self.tab = tab;
+                });
+                sel_x
             });
+            let view_w = out.inner_rect.width();
+            bar.offset = out.state.offset.x;
+            bar.max_offset = (out.content_size.x - view_w).max(0.0);
+            // ◀ ▶ を出しているときは、それを除いた幅で比べる (出す・消すを行ったり来たりしないように)
+            let room = if bar.overflow { view_w + arrows_w } else { view_w };
+            let overflow = out.content_size.x > room + 0.5;
+            if bar.overflow && ui.add_enabled(bar.offset < bar.max_offset - 0.5, egui::Button::new("▶").min_size(arrow)).clicked() {
+                bar.goto = Some(page(bar, view_w, 1.0));
+            }
+            // 選んだタブが変わったか、帯の幅が変わったら、選んだタブが隠れていれば見える所まで動かす
+            let key = (shown.clone(), full_w);
+            if bar.goto.is_none()
+                && overflow == bar.overflow
+                && bar.revealed.as_ref() != Some(&key)
+                && let Some((x0, x1)) = out.inner
+            {
+                let pad = ui.spacing().item_spacing.x * 4.0;
+                let to = if x0 < bar.offset {
+                    Some(x0 - pad)
+                } else if x1 > bar.offset + view_w {
+                    Some(x1 - view_w + pad)
+                } else {
+                    None
+                };
+                if let Some(x) = to {
+                    bar.goto = Some(x.clamp(0.0, bar.max_offset));
+                }
+                bar.revealed = Some(key);
+            }
+            if bar.goto.is_some() || overflow != bar.overflow {
+                ui.ctx().request_repaint();
+            }
+            bar.overflow = overflow;
         });
-        if cfg.view.hide_ignored_tab && self.tab == Tab::Ignored {
+        self.tab = tab;
+        if cfg.view.hide_ignored_tab && self.tab == Tab::Ignored || cfg.view.hide_new_tab && self.tab == Tab::New {
             self.tab = Tab::All;
         }
     }
@@ -1145,7 +1243,7 @@ impl App {
 
     /// 再生を始めたチャンネルの接続の進み具合。右から左に並べる中で呼ぶ。何か出したら true
     fn play_status(&mut self, ui: &mut egui::Ui) -> bool {
-        let Some(w) = self.play_watch.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        let Some(w) = self.play_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() else {
             return false;
         };
         let name: String = if w.name.chars().count() > 20 { w.name.chars().take(19).chain(Some('…')).collect() } else { w.name.clone() };
@@ -1157,7 +1255,7 @@ impl App {
             Some(PlayOutcome::TimedOut(t)) => {
                 (format!("✖ {} {}秒たってもプレイヤーが開きません", name, t.as_secs()), Some(Color32::from_rgb(220, 60, 60)))
             }
-            Some(PlayOutcome::Unknown) => (format!("▶ {} プレイヤーを起動しました", name), None),
+            Some(PlayOutcome::Unknown) => (format!("▶ {name} プレイヤーを起動しました"), None),
             None => (format!("{} {} {}秒", name, w.state_text(), w.started.elapsed().as_secs()), None),
         };
         let t = RichText::new(text);
@@ -1167,10 +1265,10 @@ impl App {
         };
         let mut hover = format!("{}\nID: {}", w.name, w.id);
         if !w.status.is_empty() {
-            hover.push_str(&format!("\nPeerCast の状態: {}", w.status));
+            let _ = write!(hover, "\nPeerCast の状態: {}", w.status);
         }
         if !w.error.is_empty() {
-            hover.push_str(&format!("\nPeerCast に接続の様子を聞けませんでした: {}", w.error));
+            let _ = write!(hover, "\nPeerCast に接続の様子を聞けませんでした: {}", w.error);
         }
         hover.push_str("\nクリックで接続中のチャンネルを表示");
         // 右から並べるので、文字を先に置くとくるくるはその左に出る
@@ -1204,7 +1302,7 @@ impl App {
                 }
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     for n in &self.notices {
-                        ui.add(egui::Label::new(RichText::new(format!("⚠ {}", n)).color(text)).wrap());
+                        ui.add(egui::Label::new(RichText::new(format!("⚠ {n}")).color(text)).wrap());
                     }
                     ui.label(RichText::new(format!("設定のファイルの場所: {}", config::base_dir().display())).color(text).small());
                 });
@@ -1274,20 +1372,20 @@ impl App {
         errors: usize,
         last_log: Option<crate::worker::LogLine>,
     ) {
-        let pc = self.pc_status.lock().unwrap_or_else(|e| e.into_inner());
+        let pc = self.pc_status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (running, agent) = (pc.running, pc.agent.clone());
         drop(pc);
         {
             ui.label(format!("{} ch", self.view.len()));
             ui.separator();
             if let Some(t) = last_update {
-                ui.label(format!("更新 {}", t));
+                ui.label(format!("更新 {t}"));
             }
             if let Some(n) = next.filter(|_| cfg.auto_update && cfg.view.show_countdown) {
                 ui.label(format!("次 {}:{:02}", n / 60, n % 60));
             }
             if errors > 0 {
-                ui.colored_label(Color32::from_rgb(220, 60, 60), format!("⚠ YP エラー {}", errors));
+                ui.colored_label(Color32::from_rgb(220, 60, 60), format!("⚠ YP エラー {errors}"));
             }
             ui.separator();
             let (dot, text) = if running {
@@ -1382,7 +1480,7 @@ impl App {
             }
             let track = c.track_text();
             if !track.is_empty() {
-                ui.label(format!("♪ {}", track));
+                ui.label(format!("♪ {track}"));
             }
             ui.horizontal_wrapped(|ui| {
                 if !c.url.is_empty() && ui.link(&c.url).on_hover_text("コンタクト URL を開く").clicked() {
@@ -1607,7 +1705,7 @@ impl App {
                 }
                 let resp = row.response();
                 if resp.hovered() {
-                    hovered = c.url.clone();
+                    hovered.clone_from(&c.url);
                 }
                 if resp.double_clicked() {
                     actions.push(Action::Play(i));
@@ -1730,7 +1828,7 @@ impl App {
         let mut actions = Vec::new();
         let mut reload = false;
         sub_window(ctx, &mut self.subs, "relay", "接続中のチャンネル (PeerCast)", [600.0, 300.0], &mut open, |ui| {
-            let r = self.relay.lock().unwrap_or_else(|e| e.into_inner());
+            let r = self.relay.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             ui.horizontal(|ui| {
                 if ui.button("⟳ 再読み込み").clicked() {
                     reload = true;
@@ -1887,7 +1985,7 @@ impl App {
                                 actions.extend(now.map(Action::Play));
                                 ui.close();
                             }
-                            let url = now.map(|i| rows[i].ch.url.clone()).unwrap_or_else(|| crate::chandir::contact_url_or_empty(&e.url));
+                            let url = now.map_or_else(|| crate::chandir::contact_url_or_empty(&e.url), |i| rows[i].ch.url.clone());
                             if ui.add_enabled(!url.is_empty(), egui::Button::new("コンタクト URL を開く")).clicked() {
                                 actions.push(Action::OpenUrl(url));
                                 ui.close();
@@ -2050,7 +2148,7 @@ impl App {
                 return;
             };
             for w in &data.warnings {
-                ui.colored_label(Color32::from_rgb(200, 140, 0), format!("⚠ {}", w));
+                ui.colored_label(Color32::from_rgb(200, 140, 0), format!("⚠ {w}"));
             }
             let other = (data.peercast.iter().chain(data.browser.iter()).filter(|i| i.checked).count(), data.peercast.iter().chain(data.browser.iter()).count());
             ui.horizontal(|ui| {
@@ -2060,7 +2158,7 @@ impl App {
                     (ImportTab::Players, "プレイヤー", (checked(&data.players), data.players.len())),
                     (ImportTab::Other, "PeerCast・ブラウザ", other),
                 ] {
-                    ui.selectable_value(&mut dlg.tab, t, format!("{} ({}/{})", label, c, n));
+                    ui.selectable_value(&mut dlg.tab, t, format!("{label} ({c}/{n})"));
                 }
             });
             ui.separator();
@@ -2164,7 +2262,7 @@ impl App {
                     for (i, f) in dlg.filters.iter().enumerate() {
                         let mark = if f.ignore { "🚫" } else if f.favorite { "★" } else { "🎨" };
                         let title = if f.title().is_empty() { "(新しいフィルター)" } else { f.title() };
-                        let mut text = RichText::new(format!("{} {}", mark, title));
+                        let mut text = RichText::new(format!("{mark} {title}"));
                         if !f.enabled {
                             text = text.weak().strikethrough();
                         }
@@ -2250,7 +2348,7 @@ impl App {
                 }
                 c.view.sub_windows = self.subs.rects.clone();
                 if let Err(e) = config::save_json(config::CONFIG_FILE, &c) {
-                    eprintln!("{}", e);
+                    eprintln!("{e}");
                 }
                 let _ = self.tx.send(Command::Quit);
             }
@@ -2379,7 +2477,7 @@ pub fn apply_style(ctx: &egui::Context, cfg: &Config) {
     let size = cfg.view.font_size.clamp(9.0, 32.0);
     ctx.all_styles_mut(|s| {
         use egui::TextStyle::*;
-        for (style, font) in s.text_styles.iter_mut() {
+        for (style, font) in &mut s.text_styles {
             font.size = match style {
                 Small => size * 0.8,
                 Heading => size * 1.3,
@@ -2577,21 +2675,21 @@ fn settings_peercast(ui: &mut egui::Ui, cfg: &mut Config, test: &Arc<Mutex<Strin
         if ui.button("接続を確認").clicked() {
             let pc = pc.clone();
             let test = test.clone();
-            *test.lock().unwrap_or_else(|e| e.into_inner()) = "確認中…".into();
+            *test.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = "確認中…".into();
             std::thread::spawn(move || {
-                let msg = if !peercast::is_running(&pc) {
-                    format!("{} につながりません。PeerCast が起動しているか確かめてください", pc.base_url())
-                } else {
+                let msg = if peercast::is_running(&pc) {
                     match Rpc::new(&pc).version_info() {
                         Ok(v) => format!("OK: {} ({})", v.agent, v.kind.label()),
-                        Err(e) => format!("ポートは開いていますが、JSON-RPC に失敗しました: {}", e),
+                        Err(e) => format!("ポートは開いていますが、JSON-RPC に失敗しました: {e}"),
                     }
+                } else {
+                    format!("{} につながりません。PeerCast が起動しているか確かめてください", pc.base_url())
                 };
-                *test.lock().unwrap_or_else(|e| e.into_inner()) = msg;
+                *test.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = msg;
                 win::request_repaint();
             });
         }
-        ui.label(test.lock().unwrap_or_else(|e| e.into_inner()).as_str());
+        ui.label(test.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_str());
     });
 }
 
@@ -2755,6 +2853,13 @@ fn settings_view(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.checkbox(&mut cfg.view.dark, "ダークモード");
     ui.checkbox(&mut cfg.view.show_info_rows, "YP のお知らせの行を表示する");
     ui.checkbox(&mut cfg.view.hide_ignored_tab, "無視のタブを隠す");
+    ui.checkbox(&mut cfg.view.hide_new_tab, "新着のタブを隠す");
+    ui.horizontal(|ui| {
+        ui.label("スクロールさせずに左に置くタブ:");
+        ui.checkbox(&mut cfg.view.pinned_tabs.favorite, "★ お気に入り");
+        ui.checkbox(&mut cfg.view.pinned_tabs.all, "すべて");
+        ui.add_enabled(!cfg.view.hide_new_tab, egui::Checkbox::new(&mut cfg.view.pinned_tabs.new, "🆕 新着"));
+    });
     ui.checkbox(&mut cfg.view.show_tooltips, "一覧で省略された文字に、カーソルを合わせると全文を出す (ツールチップ)");
     ui.separator();
     ui.horizontal(|ui| {
@@ -2778,10 +2883,14 @@ fn checked<T>(v: &[Item<T>]) -> usize {
 fn check_all_buttons<T>(ui: &mut egui::Ui, items: &mut [Item<T>]) {
     ui.horizontal(|ui| {
         if ui.button("すべて選ぶ").clicked() {
-            items.iter_mut().for_each(|i| i.checked = true);
+            for i in items.iter_mut() {
+                i.checked = true;
+            }
         }
         if ui.button("すべて外す").clicked() {
-            items.iter_mut().for_each(|i| i.checked = false);
+            for i in items.iter_mut() {
+                i.checked = false;
+            }
         }
     });
 }
@@ -2960,7 +3069,7 @@ fn filter_preview(ui: &mut egui::Ui, f: &Filter, source: Option<&Channel>, rows:
     let unique = hits.iter().filter(|r| keys.insert(r.ch.key())).count();
     ui.separator();
     let head = if f.ignore { "このフィルターで無視するチャンネル" } else { "このフィルターが当たるチャンネル" };
-    ui.label(RichText::new(format!("{} (今の一覧で {} 件)", head, unique)).strong());
+    ui.label(RichText::new(format!("{head} (今の一覧で {unique} 件)")).strong());
     if let Some(src) = source
         && !hits.iter().any(|r| r.ch.key() == src.key())
     {

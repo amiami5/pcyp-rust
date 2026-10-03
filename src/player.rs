@@ -162,7 +162,7 @@ pub fn expand_args(template: &str, pc: &PeerCastConfig, c: &Channel) -> Vec<Stri
         .map(|arg| {
             let out = replace_tokens(&arg, &table);
             // 雛形にない - で始まると、プレイヤーがオプションとして読むので、前に空白を足す
-            if out.starts_with('-') && !arg.starts_with('-') { format!(" {}", out) } else { out }
+            if out.starts_with('-') && !arg.starts_with('-') { format!(" {out}") } else { out }
         })
         .collect()
 }
@@ -204,7 +204,7 @@ pub fn play(cfg: &Config, c: &Channel) -> Result<(String, u32), String> {
 /// http(s) の URL だけをブラウザで開く。
 pub fn open_url(browser: &str, url: &str) -> Result<(), String> {
     if !chandir::is_http_url(url) {
-        return Err(format!("http(s) でない URL は開きません: {}", url));
+        return Err(format!("http(s) でない URL は開きません: {url}"));
     }
     if !browser.trim().is_empty() {
         let exe = resolve_exe(browser);
@@ -220,7 +220,7 @@ fn shell_open(url: &str) -> Result<(), String> {
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
     let (op, file) = (wide("open"), wide(url));
     let r = unsafe { ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
-    if r as isize > 32 { Ok(()) } else { Err(format!("URL を開けません: {}", url)) }
+    if r as isize > 32 { Ok(()) } else { Err(format!("URL を開けません: {url}")) }
 }
 
 #[cfg(not(windows))]

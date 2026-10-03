@@ -6,7 +6,7 @@ pub const USER_AGENT: &str = concat!("YPBrowser/", env!("CARGO_PKG_VERSION"), " 
 /// 本体の上限 (gzip などを展開した後の大きさ)
 pub const MAX_BODY: u64 = 4 * 1024 * 1024;
 
-/// 転送には自動で付いていかない。付いていくと、YP がローカルの PeerCast
+/// 転送には自動で付いていかない。付いていくと、YP がローカルの `PeerCast`
 /// (`http://127.0.0.1:7144/admin?...`) などへ要求を打たせられるため。
 fn agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
@@ -21,10 +21,10 @@ fn agent() -> ureq::Agent {
 /// `feed_url` に `host=localhost:<port>` を付けたもの。
 pub fn request_url(feed_url: &str, peercast_port: u16) -> String {
     let sep = if feed_url.contains('?') { '&' } else { '?' };
-    format!("{}{}host=localhost%3A{}", feed_url, sep, peercast_port)
+    format!("{feed_url}{sep}host=localhost%3A{peercast_port}")
 }
 
-/// UTF-8 として読めなければ Shift_JIS として読む。
+/// UTF-8 として読めなければ `Shift_JIS` として読む。
 pub fn decode_text(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     match std::str::from_utf8(bytes) {
@@ -46,7 +46,7 @@ pub fn read_body(resp: &mut ureq::http::Response<ureq::Body>, max: u64) -> Resul
         .read_to_end(&mut buf)
         .map_err(|e| e.to_string())?;
     if buf.len() as u64 > max {
-        return Err(format!("応答が大きすぎます ({} バイトまで)", max));
+        return Err(format!("応答が大きすぎます ({max} バイトまで)"));
     }
     Ok(buf)
 }
@@ -67,21 +67,21 @@ fn resolve_location(base: &str, loc: &str) -> Option<String> {
     }
     let (scheme, rest) = base.split_once("://")?;
     if let Some(l) = loc.strip_prefix("//") {
-        return Some(format!("{}://{}", scheme, l));
+        return Some(format!("{scheme}://{l}"));
     }
     let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let origin = &base[..scheme.len() + 3 + auth_end];
     if loc.starts_with('/') {
-        return Some(format!("{}{}", origin, loc));
+        return Some(format!("{origin}{loc}"));
     }
     let path = &rest[auth_end..];
     let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
     let dir = &path[..path.rfind('/').map_or(0, |i| i + 1)];
     let dir = if dir.is_empty() { "/" } else { dir };
     if loc.starts_with('?') {
-        Some(format!("{}{}{}", origin, path, loc))
+        Some(format!("{origin}{path}{loc}"))
     } else {
-        Some(format!("{}{}{}", origin, dir, loc))
+        Some(format!("{origin}{dir}{loc}"))
     }
 }
 
@@ -128,15 +128,15 @@ pub fn fetch_index(feed_url: &str, peercast_port: u16) -> Result<String, String>
             .get("location")
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| format!("HTTP {} (転送先がありません)", resp.status()))?;
-        let next = resolve_location(&url, loc.trim()).ok_or_else(|| format!("転送先が読めません: {}", loc))?;
+        let next = resolve_location(&url, loc.trim()).ok_or_else(|| format!("転送先が読めません: {loc}"))?;
         if !same_origin_redirect(&url, &next) {
-            return Err(format!("別のホストへの転送は取りに行きません: {}", next));
+            return Err(format!("別のホストへの転送は取りに行きません: {next}"));
         }
         resp = get(&agent, &next)?;
     }
     let status = resp.status();
     if status.as_u16() != 200 {
-        return Err(format!("HTTP {}", status));
+        return Err(format!("HTTP {status}"));
     }
     let body = read_body(&mut resp, MAX_BODY)?;
     Ok(decode_text(&body))
@@ -178,7 +178,7 @@ mod tests {
             body
         );
         let (port, h) = serve_once(resp.into_bytes());
-        let text = fetch_index(&format!("http://127.0.0.1:{}/sp/index.txt", port), 7144).unwrap();
+        let text = fetch_index(&format!("http://127.0.0.1:{port}/sp/index.txt"), 7144).unwrap();
         assert_eq!(text, body);
         assert_eq!(h.join().unwrap(), "GET /sp/index.txt?host=localhost%3A7144 HTTP/1.1\r\n");
     }
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn non_200_is_error() {
         let (port, h) = serve_once(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec());
-        assert!(fetch_index(&format!("http://127.0.0.1:{}/index.txt", port), 7144).is_err());
+        assert!(fetch_index(&format!("http://127.0.0.1:{port}/index.txt"), 7144).is_err());
         h.join().unwrap();
     }
 
@@ -215,7 +215,7 @@ mod tests {
             }
             firsts
         });
-        let text = fetch_index(&format!("http://127.0.0.1:{}/index.txt", port), 7144).unwrap();
+        let text = fetch_index(&format!("http://127.0.0.1:{port}/index.txt"), 7144).unwrap();
         assert_eq!(text, "a<>b\n");
         assert_eq!(h.join().unwrap()[1], "GET /new/index.txt HTTP/1.1\r\n");
     }
@@ -227,11 +227,10 @@ mod tests {
         target.set_nonblocking(true).unwrap();
         let tport = target.local_addr().unwrap().port();
         let resp = format!(
-            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/admin?cmd=stop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            tport
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{tport}/admin?cmd=stop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         let (port, h) = serve_once(resp.into_bytes());
-        let err = fetch_index(&format!("http://127.0.0.1:{}/index.txt", port), tport).unwrap_err();
+        let err = fetch_index(&format!("http://127.0.0.1:{port}/index.txt"), tport).unwrap_err();
         assert!(err.contains("転送"), "{}", err);
         h.join().unwrap();
         assert!(target.accept().is_err());
@@ -256,7 +255,7 @@ Connection: close
         .into_bytes();
         resp.extend_from_slice(&gz);
         let (port, h) = serve_once(resp);
-        let err = fetch_index(&format!("http://127.0.0.1:{}/index.txt", port), 7144).unwrap_err();
+        let err = fetch_index(&format!("http://127.0.0.1:{port}/index.txt"), 7144).unwrap_err();
         assert!(err.contains("大きすぎ"), "{}", err);
         h.join().unwrap();
     }
@@ -265,13 +264,13 @@ Connection: close
     fn rejects_too_large_body() {
         let n = MAX_BODY as usize + 1;
         let mut resp = format!("HTTP/1.1 200 OK
-Content-Length: {}
+Content-Length: {n}
 Connection: close
 
-", n).into_bytes();
+").into_bytes();
         resp.extend(std::iter::repeat_n(b'\n', n));
         let (port, h) = serve_once(resp);
-        assert!(fetch_index(&format!("http://127.0.0.1:{}/index.txt", port), 7144).is_err());
+        assert!(fetch_index(&format!("http://127.0.0.1:{port}/index.txt"), 7144).is_err());
         h.join().unwrap();
     }
 
