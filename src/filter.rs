@@ -134,7 +134,7 @@ impl Template {
             Template::Exact => (exact, vec!["name"]),
             Template::Contains => (regex::escape(name_core(&c.name)), vec!["name"]),
             Template::Contact => (url, vec!["url"]),
-            Template::NameOrContact => (format!("{}|{}", exact, url), vec!["name", "url"]),
+            Template::NameOrContact => (format!("{exact}|{url}"), vec!["name", "url"]),
         };
         Search { enabled: true, search, fields: fields.into_iter().map(String::from).collect() }
     }
@@ -385,7 +385,7 @@ mod tests {
         for t in Template::ALL {
             assert!(t.usable(&c));
             let f = compile_one(&t.filter(&c)).unwrap();
-            assert!(f.is_match(&c, ""), "{:?}", t);
+            assert!(f.is_match(&c, ""), "{t:?}");
         }
         let other = |name: &str, url: &str| Channel { name: name.into(), url: url.into(), ..Default::default() };
         let m = |t: Template, o: &Channel| compile_one(&t.filter(&c)).unwrap().is_match(o, "");

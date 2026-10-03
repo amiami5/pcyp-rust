@@ -84,7 +84,7 @@ impl HistoryEntry {
 pub fn save(shared: &SharedRef) {
     let h = lock(shared).history.clone();
     if let Err(e) = config::save_json(config::HISTORY_FILE, &h) {
-        lock(shared).log(true, format!("履歴を保存できません: {}", e));
+        lock(shared).log(true, format!("履歴を保存できません: {e}"));
     }
 }
 
@@ -122,7 +122,7 @@ mod tests {
     fn keeps_max_entries() {
         let mut h = History::default();
         for i in 0..5 {
-            h.record(&ch(&format!("c{}", i), "1"), "", String::new(), 3);
+            h.record(&ch(&format!("c{i}"), "1"), "", String::new(), 3);
         }
         let names: Vec<_> = h.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["c4", "c3", "c2"]);

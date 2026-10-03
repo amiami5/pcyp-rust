@@ -1,5 +1,7 @@
 //! YP の index.txt の解析。
 
+use std::fmt::Write as _;
+
 pub const NUM_FIELDS: usize = 19;
 pub const ZERO_ID: &str = "00000000000000000000000000000000";
 
@@ -58,16 +60,16 @@ impl Channel {
     pub fn summary(&self) -> String {
         let mut s = String::new();
         match (self.genre.is_empty(), self.desc.is_empty()) {
-            (false, false) => s.push_str(&format!("[{} - {}]", self.genre, self.desc)),
-            (false, true) => s.push_str(&format!("[{}]", self.genre)),
-            (true, false) => s.push_str(&format!("[{}]", self.desc)),
+            (false, false) => _ = write!(s, "[{} - {}]", self.genre, self.desc),
+            (false, true) => _ = write!(s, "[{}]", self.genre),
+            (true, false) => _ = write!(s, "[{}]", self.desc),
             (true, true) => {}
         }
         if !self.comment.is_empty() {
             if !s.is_empty() {
                 s.push(' ');
             }
-            s.push_str(&format!("「{}」", self.comment));
+            let _ = write!(s, "「{}」", self.comment);
         }
         s
     }
@@ -93,7 +95,7 @@ pub fn atoi(s: &str) -> i32 {
     let n = digits
         .bytes()
         .take_while(u8::is_ascii_digit)
-        .fold(0i32, |a, d| a.wrapping_mul(10).wrapping_add((d - b'0') as i32));
+        .fold(0i32, |a, d| a.wrapping_mul(10).wrapping_add(i32::from(d - b'0')));
     if neg { n.wrapping_neg() } else { n }
 }
 
@@ -138,7 +140,7 @@ fn is_safe_contact_url(s: &str) -> bool {
         return false;
     }
     match parse_browser_ipv4(host) {
-        Some(Some(a)) => is_public_v4(&a),
+        Some(Some(a)) => is_public_v4(a),
         Some(None) => false,
         None => true,
     }
@@ -179,7 +181,7 @@ fn parse_browser_ipv4(host: &str) -> Option<Option<std::net::Ipv4Addr>> {
     Some(Some(std::net::Ipv4Addr::from(v as u32)))
 }
 
-fn is_public_v4(a: &std::net::Ipv4Addr) -> bool {
+fn is_public_v4(a: std::net::Ipv4Addr) -> bool {
     let o = a.octets();
     !(o[0] == 0
         || a.is_loopback()
@@ -191,7 +193,7 @@ fn is_public_v4(a: &std::net::Ipv4Addr) -> bool {
 
 fn is_public_v6(a: &std::net::Ipv6Addr) -> bool {
     if let Some(v4) = a.to_ipv4_mapped() {
-        return is_public_v4(&v4);
+        return is_public_v4(v4);
     }
     let s = a.segments();
     // ::a.b.c.d (古い IPv4 互換の形)
@@ -334,7 +336,7 @@ fn reencode(s: &str) -> String {
         match c {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'+' => out.push(c as char),
             b'%' if pct => out.push('%'),
-            _ => out.push_str(&format!("%{:02X}", c)),
+            _ => _ = write!(out, "%{c:02X}"),
         }
     }
     out
@@ -368,18 +370,15 @@ pub fn unescape_html(s: &str) -> String {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
         let decoded = rest[1..].find(';').filter(|&n| n <= 10).and_then(|n| {
-            let ent = &rest[1..1 + n];
+            let ent = &rest[1..=n];
             decode_entity(ent).map(|c| (c, n + 2))
         });
-        match decoded {
-            Some((c, len)) => {
-                out.push(c);
-                rest = &rest[len..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
+        if let Some((c, len)) = decoded {
+            out.push(c);
+            rest = &rest[len..];
+        } else {
+            out.push('&');
+            rest = &rest[1..];
         }
     }
     out.push_str(rest);
@@ -415,9 +414,9 @@ pub fn url_encode(s: &str) -> String {
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' | b'[' | b']' => {
-                out.push(b as char)
+                out.push(b as char);
             }
-            _ => out.push_str(&format!("%{:02X}", b)),
+            _ => _ = write!(out, "%{b:02X}"),
         }
     }
     out
@@ -451,7 +450,7 @@ mod tests {
     #[test]
     fn drops_non_http_urls_and_counts_lines() {
         let bad = LINE.replace("http://www.example.com/", "javascript:alert(1)");
-        let text = format!("{}\r\nbroken<>line\n{}\nfile<>x\n", LINE, bad);
+        let text = format!("{LINE}\r\nbroken<>line\n{bad}\nfile<>x\n");
         let (c, e) = parse_index(&text, "http://yp/index.txt");
         assert_eq!(c.len(), 2);
         assert_eq!(e, BadLines { count: 2, first: vec![2, 4], skipped: 0 });
@@ -474,15 +473,15 @@ mod tests {
         let (c, _) = parse_index(&long, "");
         assert!(c[0].name.len() <= MAX_FIELD_BYTES && c[0].name.starts_with("あ"));
 
-        let text = format!("{}
-", LINE).repeat(MAX_CHANNELS + 10);
+        let text = format!("{LINE}
+").repeat(MAX_CHANNELS + 10);
         let (c, e) = parse_index(&text, "");
         assert_eq!(c.len(), MAX_CHANNELS);
         assert_eq!((e.count, e.skipped), (0, 10));
         assert!(!e.is_empty());
 
         // "<>" が多すぎる行は解析できない行
-        let (c, e) = parse_index(&format!("{}<>x", LINE), "");
+        let (c, e) = parse_index(&format!("{LINE}<>x"), "");
         assert!(c.is_empty());
         assert_eq!(e.count, 1);
     }
@@ -545,7 +544,7 @@ mod tests {
     fn empty_and_no_trailing_newline() {
         assert_eq!(parse_index("", "").0.len(), 0);
         assert_eq!(parse_index(LINE, "").0.len(), 1);
-        assert_eq!(parse_index(&format!("{}\n", LINE), "").1.count, 0);
+        assert_eq!(parse_index(&format!("{LINE}\n"), "").1.count, 0);
     }
 
     #[test]

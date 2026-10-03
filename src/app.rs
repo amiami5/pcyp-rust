@@ -13,6 +13,7 @@ use crate::worker::{Command, FetchState, SharedRef, lock};
 use eframe::egui::{self, Align, Color32, FontFamily, Key, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
@@ -349,7 +350,7 @@ struct PcStatus {
     agent: String,
 }
 
-/// 再生を始めてから、プレイヤーの窓が出るか PeerCast が受信し始めるまでを見張る長さ
+/// 再生を始めてから、プレイヤーの窓が出るか `PeerCast` が受信し始めるまでを見張る長さ
 const PLAY_WATCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 見張りの終わり方
@@ -357,7 +358,7 @@ const PLAY_WATCH_TIMEOUT: Duration = Duration::from_secs(60);
 enum PlayOutcome {
     /// プレイヤーの窓が出た (かかった時間)
     Opened(Duration),
-    /// PeerCast が受信し始めた (かかった時間)。窓は見つからなかった
+    /// `PeerCast` が受信し始めた (かかった時間)。窓は見つからなかった
     Receiving(Duration),
     /// 待っても窓が出ず、受信にもならなかった
     TimedOut(Duration),
@@ -366,15 +367,15 @@ enum PlayOutcome {
     Unknown,
 }
 
-/// 再生を始めたチャンネルの、プレイヤーと PeerCast の様子 (右下に出す)
+/// 再生を始めたチャンネルの、プレイヤーと `PeerCast` の様子 (右下に出す)
 #[derive(Clone)]
 struct PlayWatch {
     id: String,
     name: String,
     started: Instant,
-    /// getChannels の status。まだ PeerCast の一覧にないなら空
+    /// getChannels の status。まだ `PeerCast` の一覧にないなら空
     status: String,
-    /// PeerCast に問い合わせられなかったときの理由 (別の PC の PeerCast はパスワードがないと断る)
+    /// `PeerCast` に問い合わせられなかったときの理由 (別の PC の `PeerCast` はパスワードがないと断る)
     error: String,
     /// 見張りが終わったら、その終わり方
     result: Option<PlayOutcome>,
@@ -397,7 +398,7 @@ impl PlayWatch {
 
 /// 見ているのが `started` の再生のままなら `f` で書き換える。新しい再生に替わっていたら false
 fn with_watch(watch: &Mutex<Option<PlayWatch>>, started: Instant, f: impl FnOnce(&mut PlayWatch)) -> bool {
-    let mut w = watch.lock().unwrap_or_else(|e| e.into_inner());
+    let mut w = watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match w.as_mut() {
         Some(w) if w.started == started => {
             f(w);
@@ -486,7 +487,7 @@ struct TabBar {
 }
 
 fn read<T: Clone>(l: &RwLock<T>) -> T {
-    l.read().unwrap_or_else(|e| e.into_inner()).clone()
+    l.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
 fn color_of(colors: &[[u8; 3]]) -> Option<Color32> {
@@ -494,7 +495,7 @@ fn color_of(colors: &[[u8; 3]]) -> Option<Color32> {
         return None;
     }
     let n = colors.len() as u32;
-    let sum = colors.iter().fold([0u32; 3], |a, c| [a[0] + c[0] as u32, a[1] + c[1] as u32, a[2] + c[2] as u32]);
+    let sum = colors.iter().fold([0u32; 3], |a, c| [a[0] + u32::from(c[0]), a[1] + u32::from(c[1]), a[2] + u32::from(c[2])]);
     Some(Color32::from_rgba_unmultiplied((sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8, 130))
 }
 
@@ -590,7 +591,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// PeerCast の起動 (設定されていれば) と、動いているかの定期的な確認。
+    /// `PeerCast` の起動 (設定されていれば) と、動いているかの定期的な確認。
     fn start_peercast_monitor(&self, ctx: egui::Context, cfg: &Config) {
         if cfg.peercast.launch_on_start {
             match peercast::launch(&cfg.peercast) {
@@ -609,7 +610,7 @@ impl App {
                     let agent = if running { Rpc::new(&pc).version_info().map(|v| v.agent).unwrap_or_default() } else { String::new() };
                     // ステータスバーの表示が変わるときだけ描き直す
                     let changed = {
-                        let mut s = status.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut s = status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         let changed = s.running != running || s.agent != agent;
                         s.running = running;
                         s.agent = agent;
@@ -767,7 +768,7 @@ impl App {
         let cfg = self.cfg();
         match player::play(&cfg, ch) {
             Ok((cmd, pid)) => {
-                self.log(false, format!("再生: {}", cmd));
+                self.log(false, format!("再生: {cmd}"));
                 history::record_play(&self.shared, &cfg, ch);
                 self.watch_play(ch, pid);
             }
@@ -781,7 +782,7 @@ impl App {
     fn watch_play(&self, ch: &Channel, pid: u32) {
         let started = Instant::now();
         let id = ch.id.to_ascii_uppercase();
-        *self.play_watch.lock().unwrap_or_else(|e| e.into_inner()) = Some(PlayWatch {
+        *self.play_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(PlayWatch {
             id: id.clone(),
             name: ch.name.clone(),
             started,
@@ -838,7 +839,7 @@ impl App {
             // 結果をしばらく出してから消す
             let keep = if let PlayOutcome::TimedOut(_) = outcome { 20 } else { 5 };
             std::thread::sleep(Duration::from_secs(keep));
-            let mut w = watch.lock().unwrap_or_else(|e| e.into_inner());
+            let mut w = watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if w.as_ref().is_some_and(|w| w.started == started) {
                 *w = None;
             }
@@ -864,7 +865,7 @@ impl App {
                 Ok(Some(r)) if r.is_newer() => s.log(false, format!("新しい版 {} が出ています", r.tag)),
                 Ok(_) if manual => s.log(false, concat!("今の版 (v", env!("CARGO_PKG_VERSION"), ") が最新です")),
                 Ok(_) => {}
-                Err(e) => s.log(true, format!("新しい版があるか確かめられませんでした: {}", e)),
+                Err(e) => s.log(true, format!("新しい版があるか確かめられませんでした: {e}")),
             }
             drop(s);
             ctx.request_repaint();
@@ -872,7 +873,7 @@ impl App {
     }
 
     fn save_filters(&mut self, filters: Vec<Filter>) {
-        *self.filters.write().unwrap_or_else(|e| e.into_inner()) = filters.clone();
+        self.filters.write().unwrap_or_else(std::sync::PoisonError::into_inner).clone_from(&filters);
         if let Err(e) = config::save_json(config::FILTER_FILE, &Filters(filters)) {
             self.log(true, e);
         }
@@ -882,7 +883,7 @@ impl App {
     fn apply_config(&mut self, ctx: &egui::Context, mut new: Config) {
         // 列の幅は画面で持っているものが正しい (設定の画面を開いた時点の古い値で上書きしない)
         new.view.column_widths = self.col_widths.clone();
-        *self.config.write().unwrap_or_else(|e| e.into_inner()) = new.clone();
+        *self.config.write().unwrap_or_else(std::sync::PoisonError::into_inner) = new.clone();
         if let Err(e) = config::save_json(config::CONFIG_FILE, &new) {
             self.log(true, e);
         }
@@ -904,18 +905,18 @@ impl App {
             let r = f(&Rpc::new(&pc));
             let mut s = lock(&shared);
             match r {
-                Ok(()) => s.log(false, format!("PeerCast: {}しました", what)),
-                Err(e) => s.log(true, format!("PeerCast: {}できません: {}", what, e)),
+                Ok(()) => s.log(false, format!("PeerCast: {what}しました")),
+                Err(e) => s.log(true, format!("PeerCast: {what}できません: {e}")),
             }
             drop(s);
-            relay_dirty.lock().unwrap_or_else(|e| e.into_inner()).loading = false;
+            relay_dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner).loading = false;
             win::request_repaint();
         });
     }
 
     fn load_relays(&mut self) {
         {
-            let mut r = self.relay.lock().unwrap_or_else(|e| e.into_inner());
+            let mut r = self.relay.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if r.loading {
                 return;
             }
@@ -926,7 +927,7 @@ impl App {
         let relay = self.relay.clone();
         std::thread::spawn(move || {
             let res = Rpc::new(&pc).channels();
-            let mut r = relay.lock().unwrap_or_else(|e| e.into_inner());
+            let mut r = relay.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             r.loading = false;
             match res {
                 Ok(c) => {
@@ -998,7 +999,7 @@ impl App {
         };
         ui.horizontal(|ui| {
             let r = ui.add_enabled(!fetching && wait == 0, egui::Button::new(if fetching { "⟳ 取得中…" } else { "⟳ 更新" }));
-            let r = if wait > 0 { r.on_disabled_hover_text(format!("あと {} 秒で更新できます", wait)) } else { r.on_hover_text("すべての YP を更新 (F5)") };
+            let r = if wait > 0 { r.on_disabled_hover_text(format!("あと {wait} 秒で更新できます")) } else { r.on_hover_text("すべての YP を更新 (F5)") };
             if r.clicked() {
                 self.refresh();
             }
@@ -1094,7 +1095,7 @@ impl App {
             ui.menu_button("列で並べ替え", |ui| {
                 for (k, label) in SortKey::COLUMNS {
                     let mark = if self.sort.0 == k { if self.sort.1 { " ▼" } else { " ▲" } } else { "" };
-                    if ui.button(format!("{}{}", label, mark)).clicked() {
+                    if ui.button(format!("{label}{mark}")).clicked() {
                         self.set_sort(k);
                         ui.close();
                     }
@@ -1240,7 +1241,7 @@ impl App {
 
     /// 再生を始めたチャンネルの接続の進み具合。右から左に並べる中で呼ぶ。何か出したら true
     fn play_status(&mut self, ui: &mut egui::Ui) -> bool {
-        let Some(w) = self.play_watch.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        let Some(w) = self.play_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() else {
             return false;
         };
         let name: String = if w.name.chars().count() > 20 { w.name.chars().take(19).chain(Some('…')).collect() } else { w.name.clone() };
@@ -1252,7 +1253,7 @@ impl App {
             Some(PlayOutcome::TimedOut(t)) => {
                 (format!("✖ {} {}秒たってもプレイヤーが開きません", name, t.as_secs()), Some(Color32::from_rgb(220, 60, 60)))
             }
-            Some(PlayOutcome::Unknown) => (format!("▶ {} プレイヤーを起動しました", name), None),
+            Some(PlayOutcome::Unknown) => (format!("▶ {name} プレイヤーを起動しました"), None),
             None => (format!("{} {} {}秒", name, w.state_text(), w.started.elapsed().as_secs()), None),
         };
         let t = RichText::new(text);
@@ -1262,10 +1263,10 @@ impl App {
         };
         let mut hover = format!("{}\nID: {}", w.name, w.id);
         if !w.status.is_empty() {
-            hover.push_str(&format!("\nPeerCast の状態: {}", w.status));
+            let _ = write!(hover, "\nPeerCast の状態: {}", w.status);
         }
         if !w.error.is_empty() {
-            hover.push_str(&format!("\nPeerCast に接続の様子を聞けませんでした: {}", w.error));
+            let _ = write!(hover, "\nPeerCast に接続の様子を聞けませんでした: {}", w.error);
         }
         hover.push_str("\nクリックで接続中のチャンネルを表示");
         // 右から並べるので、文字を先に置くとくるくるはその左に出る
@@ -1299,7 +1300,7 @@ impl App {
                 }
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     for n in &self.notices {
-                        ui.add(egui::Label::new(RichText::new(format!("⚠ {}", n)).color(text)).wrap());
+                        ui.add(egui::Label::new(RichText::new(format!("⚠ {n}")).color(text)).wrap());
                     }
                     ui.label(RichText::new(format!("設定のファイルの場所: {}", config::base_dir().display())).color(text).small());
                 });
@@ -1369,20 +1370,20 @@ impl App {
         errors: usize,
         last_log: Option<crate::worker::LogLine>,
     ) {
-        let pc = self.pc_status.lock().unwrap_or_else(|e| e.into_inner());
+        let pc = self.pc_status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (running, agent) = (pc.running, pc.agent.clone());
         drop(pc);
         {
             ui.label(format!("{} ch", self.view.len()));
             ui.separator();
             if let Some(t) = last_update {
-                ui.label(format!("更新 {}", t));
+                ui.label(format!("更新 {t}"));
             }
             if let Some(n) = next.filter(|_| cfg.auto_update && cfg.view.show_countdown) {
                 ui.label(format!("次 {}:{:02}", n / 60, n % 60));
             }
             if errors > 0 {
-                ui.colored_label(Color32::from_rgb(220, 60, 60), format!("⚠ YP エラー {}", errors));
+                ui.colored_label(Color32::from_rgb(220, 60, 60), format!("⚠ YP エラー {errors}"));
             }
             ui.separator();
             let (dot, text) = if running {
@@ -1477,7 +1478,7 @@ impl App {
             }
             let track = c.track_text();
             if !track.is_empty() {
-                ui.label(format!("♪ {}", track));
+                ui.label(format!("♪ {track}"));
             }
             ui.horizontal_wrapped(|ui| {
                 if !c.url.is_empty() && ui.link(&c.url).on_hover_text("コンタクト URL を開く").clicked() {
@@ -1702,7 +1703,7 @@ impl App {
                 }
                 let resp = row.response();
                 if resp.hovered() {
-                    hovered = c.url.clone();
+                    hovered.clone_from(&c.url);
                 }
                 if resp.double_clicked() {
                     actions.push(Action::Play(i));
@@ -1825,7 +1826,7 @@ impl App {
         let mut actions = Vec::new();
         let mut reload = false;
         sub_window(ctx, &mut self.subs, "relay", "接続中のチャンネル (PeerCast)", [600.0, 300.0], &mut open, |ui| {
-            let r = self.relay.lock().unwrap_or_else(|e| e.into_inner());
+            let r = self.relay.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             ui.horizontal(|ui| {
                 if ui.button("⟳ 再読み込み").clicked() {
                     reload = true;
@@ -1982,7 +1983,7 @@ impl App {
                                 actions.extend(now.map(Action::Play));
                                 ui.close();
                             }
-                            let url = now.map(|i| rows[i].ch.url.clone()).unwrap_or_else(|| crate::chandir::contact_url_or_empty(&e.url));
+                            let url = now.map_or_else(|| crate::chandir::contact_url_or_empty(&e.url), |i| rows[i].ch.url.clone());
                             if ui.add_enabled(!url.is_empty(), egui::Button::new("コンタクト URL を開く")).clicked() {
                                 actions.push(Action::OpenUrl(url));
                                 ui.close();
@@ -2145,7 +2146,7 @@ impl App {
                 return;
             };
             for w in &data.warnings {
-                ui.colored_label(Color32::from_rgb(200, 140, 0), format!("⚠ {}", w));
+                ui.colored_label(Color32::from_rgb(200, 140, 0), format!("⚠ {w}"));
             }
             let other = (data.peercast.iter().chain(data.browser.iter()).filter(|i| i.checked).count(), data.peercast.iter().chain(data.browser.iter()).count());
             ui.horizontal(|ui| {
@@ -2155,7 +2156,7 @@ impl App {
                     (ImportTab::Players, "プレイヤー", (checked(&data.players), data.players.len())),
                     (ImportTab::Other, "PeerCast・ブラウザ", other),
                 ] {
-                    ui.selectable_value(&mut dlg.tab, t, format!("{} ({}/{})", label, c, n));
+                    ui.selectable_value(&mut dlg.tab, t, format!("{label} ({c}/{n})"));
                 }
             });
             ui.separator();
@@ -2259,7 +2260,7 @@ impl App {
                     for (i, f) in dlg.filters.iter().enumerate() {
                         let mark = if f.ignore { "🚫" } else if f.favorite { "★" } else { "🎨" };
                         let title = if f.title().is_empty() { "(新しいフィルター)" } else { f.title() };
-                        let mut text = RichText::new(format!("{} {}", mark, title));
+                        let mut text = RichText::new(format!("{mark} {title}"));
                         if !f.enabled {
                             text = text.weak().strikethrough();
                         }
@@ -2345,7 +2346,7 @@ impl App {
                 }
                 c.view.sub_windows = self.subs.rects.clone();
                 if let Err(e) = config::save_json(config::CONFIG_FILE, &c) {
-                    eprintln!("{}", e);
+                    eprintln!("{e}");
                 }
                 let _ = self.tx.send(Command::Quit);
             }
@@ -2474,7 +2475,7 @@ pub fn apply_style(ctx: &egui::Context, cfg: &Config) {
     let size = cfg.view.font_size.clamp(9.0, 32.0);
     ctx.all_styles_mut(|s| {
         use egui::TextStyle::*;
-        for (style, font) in s.text_styles.iter_mut() {
+        for (style, font) in &mut s.text_styles {
             font.size = match style {
                 Small => size * 0.8,
                 Heading => size * 1.3,
@@ -2672,21 +2673,21 @@ fn settings_peercast(ui: &mut egui::Ui, cfg: &mut Config, test: &Arc<Mutex<Strin
         if ui.button("接続を確認").clicked() {
             let pc = pc.clone();
             let test = test.clone();
-            *test.lock().unwrap_or_else(|e| e.into_inner()) = "確認中…".into();
+            *test.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = "確認中…".into();
             std::thread::spawn(move || {
-                let msg = if !peercast::is_running(&pc) {
-                    format!("{} につながりません。PeerCast が起動しているか確かめてください", pc.base_url())
-                } else {
+                let msg = if peercast::is_running(&pc) {
                     match Rpc::new(&pc).version_info() {
                         Ok(v) => format!("OK: {} ({})", v.agent, v.kind.label()),
-                        Err(e) => format!("ポートは開いていますが、JSON-RPC に失敗しました: {}", e),
+                        Err(e) => format!("ポートは開いていますが、JSON-RPC に失敗しました: {e}"),
                     }
+                } else {
+                    format!("{} につながりません。PeerCast が起動しているか確かめてください", pc.base_url())
                 };
-                *test.lock().unwrap_or_else(|e| e.into_inner()) = msg;
+                *test.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = msg;
                 win::request_repaint();
             });
         }
-        ui.label(test.lock().unwrap_or_else(|e| e.into_inner()).as_str());
+        ui.label(test.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_str());
     });
 }
 
@@ -2879,10 +2880,14 @@ fn checked<T>(v: &[Item<T>]) -> usize {
 fn check_all_buttons<T>(ui: &mut egui::Ui, items: &mut [Item<T>]) {
     ui.horizontal(|ui| {
         if ui.button("すべて選ぶ").clicked() {
-            items.iter_mut().for_each(|i| i.checked = true);
+            for i in items.iter_mut() {
+                i.checked = true;
+            }
         }
         if ui.button("すべて外す").clicked() {
-            items.iter_mut().for_each(|i| i.checked = false);
+            for i in items.iter_mut() {
+                i.checked = false;
+            }
         }
     });
 }
@@ -3061,7 +3066,7 @@ fn filter_preview(ui: &mut egui::Ui, f: &Filter, source: Option<&Channel>, rows:
     let unique = hits.iter().filter(|r| keys.insert(r.ch.key())).count();
     ui.separator();
     let head = if f.ignore { "このフィルターで無視するチャンネル" } else { "このフィルターが当たるチャンネル" };
-    ui.label(RichText::new(format!("{} (今の一覧で {} 件)", head, unique)).strong());
+    ui.label(RichText::new(format!("{head} (今の一覧で {unique} 件)")).strong());
     if let Some(src) = source
         && !hits.iter().any(|r| r.ch.key() == src.key())
     {

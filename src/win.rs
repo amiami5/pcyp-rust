@@ -66,7 +66,7 @@ mod imp {
     /// 今の日時 (年、月、日、時、分、秒)
     pub fn local_time() -> [u16; 6] {
         let mut st = unsafe { std::mem::zeroed() };
-        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
+        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&raw mut st) };
         let st: windows_sys::Win32::Foundation::SYSTEMTIME = st;
         [st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond]
     }
@@ -78,7 +78,7 @@ mod imp {
 
     fn monitor_info(m: windows_sys::Win32::Graphics::Gdi::HMONITOR) -> Option<MONITORINFO> {
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        (!m.is_null() && unsafe { GetMonitorInfoW(m, &mut mi) } != 0).then_some(mi)
+        (!m.is_null() && unsafe { GetMonitorInfoW(m, &raw mut mi) } != 0).then_some(mi)
     }
 
     /// WINDOWPLACEMENT の座標 (ワークスペース座標) とスクリーン座標のずれ。
@@ -94,7 +94,7 @@ mod imp {
     fn placement(h: windows_sys::Win32::Foundation::HWND) -> Option<WINDOWPLACEMENT> {
         let mut wp: WINDOWPLACEMENT = unsafe { std::mem::zeroed() };
         wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-        (unsafe { GetWindowPlacement(h, &mut wp) } != 0).then_some(wp)
+        (unsafe { GetWindowPlacement(h, &raw mut wp) } != 0).then_some(wp)
     }
 
     /// 通常の状態 (最小化・最大化していないとき) の窓の位置と大きさ。スクリーン座標の [左, 上, 右, 下]。
@@ -140,13 +140,13 @@ mod imp {
         let (ox, oy) = workspace_offset();
         wp.rcNormalPosition = RECT { left: r[0] - ox, top: r[1] - oy, right: r[2] - ox, bottom: r[3] - oy };
         wp.showCmd = if unsafe { IsWindowVisible(h) } != 0 { SW_SHOWNORMAL as u32 } else { SW_HIDE as u32 };
-        unsafe { SetWindowPlacement(h, &wp) };
+        unsafe { SetWindowPlacement(h, &raw const wp) };
     }
 
     /// 窓のタイトルバーのあたりが、どれかのモニターの作業領域 (タスクバーを除く範囲) に十分見えているか。
     pub fn rect_is_on_screen(r: [i32; 4]) -> bool {
         let strip = RECT { left: r[0], top: r[1], right: r[2], bottom: r[1] + super::TITLE_STRIP };
-        let m = unsafe { MonitorFromRect(&strip, MONITOR_DEFAULTTONULL) };
+        let m = unsafe { MonitorFromRect(&raw const strip, MONITOR_DEFAULTTONULL) };
         match monitor_info(m) {
             Some(mi) => {
                 let w = mi.rcWork;
@@ -170,10 +170,10 @@ mod imp {
         let mut procs = Vec::new();
         let mut e: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
         e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        let mut ok = unsafe { Process32FirstW(snap, &mut e) } != 0;
+        let mut ok = unsafe { Process32FirstW(snap, &raw mut e) } != 0;
         while ok {
             procs.push((e.th32ProcessID, e.th32ParentProcessID));
-            ok = unsafe { Process32NextW(snap, &mut e) } != 0;
+            ok = unsafe { Process32NextW(snap, &raw mut e) } != 0;
         }
         unsafe { CloseHandle(snap) };
         // 孫、ひ孫と、増えなくなるまで足す
@@ -201,19 +201,19 @@ mod imp {
         unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> i32 {
             let s = unsafe { &mut *(lp as *mut Search) };
             let mut pid = 0;
-            unsafe { GetWindowThreadProcessId(h, &mut pid) };
+            unsafe { GetWindowThreadProcessId(h, &raw mut pid) };
             if !s.pids.contains(&pid) || unsafe { IsWindowVisible(h) } == 0 || !unsafe { GetWindow(h, GW_OWNER) }.is_null() {
                 return 1;
             }
             let mut r = RECT::default();
-            if unsafe { GetWindowRect(h, &mut r) } != 0 && r.right - r.left >= 50 && r.bottom - r.top >= 50 {
+            if unsafe { GetWindowRect(h, &raw mut r) } != 0 && r.right - r.left >= 50 && r.bottom - r.top >= 50 {
                 s.found = true;
                 return 0;
             }
             1
         }
         let mut s = Search { pids, found: false };
-        unsafe { EnumWindows(Some(each), &mut s as *mut Search as LPARAM) };
+        unsafe { EnumWindows(Some(each), &raw mut s as LPARAM) };
         s.found
     }
 }
@@ -276,19 +276,19 @@ fn visible_enough(r: [i32; 4], work: [i32; 4]) -> bool {
 /// 今の時刻 (`hh:mm:ss`)。
 pub fn now_hms() -> String {
     let [_, _, _, h, m, s] = imp::local_time();
-    format!("{:02}:{:02}:{:02}", h, m, s)
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 /// 履歴に残す今の日時 (`2026-09-30 21:05`)。
 pub fn now_ymdhm() -> String {
     let [y, mo, d, h, mi, _] = imp::local_time();
-    format!("{:04}-{:02}-{:02} {:02}:{:02}", y, mo, d, h, mi)
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")
 }
 
 /// ファイル名に使う今の日時 (`20260925-001637`)。
 pub fn now_stamp() -> String {
     let [y, mo, d, h, mi, s] = imp::local_time();
-    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", y, mo, d, h, mi, s)
+    format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
 
 /// ウィンドウのアイコン (一度だけ作る)。
@@ -307,12 +307,12 @@ pub fn notify_channels(chans: &[Channel], config: Arc<RwLock<Config>>, shared: S
         let (config, shared) = (config.clone(), shared.clone());
         show_toast(&format!("配信開始: {}", c.name), &body, Some(Box::new(move |action: Option<String>| {
             if action.as_deref() == Some("play") {
-                let cfg = config.read().unwrap_or_else(|e| e.into_inner()).clone();
+                let cfg = config.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
                 let r = crate::player::play(&cfg, &ch);
                 let ok = r.is_ok();
                 let mut s = lock(&shared);
                 match r {
-                    Ok((cmd, _)) => s.log(false, format!("再生: {}", cmd)),
+                    Ok((cmd, _)) => s.log(false, format!("再生: {cmd}")),
                     Err(e) => s.log(true, e),
                 }
                 drop(s);
@@ -449,7 +449,7 @@ mod tests {
     /// 実際に窓を開くので、手で `cargo test -- --ignored finds_player_window` として動かす
     #[cfg(windows)]
     #[test]
-    #[ignore]
+    #[ignore = "実際に窓を開く"]
     fn finds_player_window() {
         use std::collections::HashSet;
         use std::time::{Duration, Instant};
@@ -467,6 +467,6 @@ mod tests {
             let _ = std::process::Command::new("taskkill").args(["/f", "/pid", &p.to_string()]).output();
         }
         let _ = child.wait();
-        assert!(found, "窓が見つからない: {:?}", pids);
+        assert!(found, "窓が見つからない: {pids:?}");
     }
 }

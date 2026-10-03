@@ -67,15 +67,15 @@ fn jp_font(data: Vec<u8>) -> egui::FontData {
     };
     // egui と同じ取り方をした行の寸法 (上向きが正、字の単位)
     let m = f.metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
-    let em = m.units_per_em as f32;
+    let em = f32::from(m.units_per_em);
     // 字の上下の真ん中は、漢字の外枠で測る
     let gm = f.glyph_metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
     let Some(b) = f.charmap().map('国').and_then(|g| gm.bounds(g)) else {
         return font;
     };
     // 行の上端から測った、字の真ん中と行の真ん中
-    let glyph_mid = m.ascent - (b.y_min + b.y_max) / 2.0;
-    let row_mid = (m.ascent - m.descent + m.leading) / 2.0;
+    let glyph_mid = m.ascent - f32::midpoint(b.y_min, b.y_max);
+    let row_mid = f32::midpoint(m.ascent - m.descent, m.leading);
     if em > 0.0 {
         font.tweak.y_offset_factor = (row_mid - glyph_mid) / em;
     }
@@ -173,7 +173,7 @@ fn main() -> eframe::Result {
                 match win::create_tray(tx.clone(), open_settings.clone()) {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        worker::lock(&shared).log(true, format!("タスクトレイにアイコンを出せません: {}", e));
+                        worker::lock(&shared).log(true, format!("タスクトレイにアイコンを出せません: {e}"));
                         None
                     }
                 }

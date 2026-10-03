@@ -11,13 +11,13 @@ use std::time::{Duration, Instant};
 pub fn latest_api_url() -> String {
     let repo = env!("CARGO_PKG_REPOSITORY").trim_end_matches('/').trim_end_matches(".git");
     let path = repo.strip_prefix("https://github.com/").unwrap_or(repo);
-    format!("https://api.github.com/repos/{}/releases/latest", path)
+    format!("https://api.github.com/repos/{path}/releases/latest")
 }
 
 /// 確かめ直す間隔。うまく確かめられたとき
-pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+pub const CHECK_INTERVAL: Duration = Duration::from_hours(24);
 /// 確かめられなかったときは、少し早めにやり直す
-pub const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub const RETRY_INTERVAL: Duration = Duration::from_hours(1);
 /// Actions が添付する zip の名前の終わり
 const ZIP_SUFFIX: &str = "-windows-x64.zip";
 
@@ -58,7 +58,7 @@ struct ApiAsset {
 
 /// API の応答を読む。下書きとプレリリースは無いものとみなす。
 pub fn parse_release(json: &str) -> Result<Option<Release>, String> {
-    let r: ApiRelease = serde_json::from_str(json).map_err(|e| format!("応答を読めません: {}", e))?;
+    let r: ApiRelease = serde_json::from_str(json).map_err(|e| format!("応答を読めません: {e}"))?;
     if r.draft || r.prerelease {
         return Ok(None);
     }
@@ -102,7 +102,7 @@ pub fn fetch_latest() -> Result<Option<Release>, String> {
     match resp.status().as_u16() {
         200 => {}
         404 => return Ok(None),
-        s => return Err(format!("HTTP {}", s)),
+        s => return Err(format!("HTTP {s}")),
     }
     let body = crate::fetch::read_body_string(&mut resp, 4 * 1024 * 1024)?;
     parse_release(&body)
@@ -144,7 +144,7 @@ impl UpdateState {
 pub type UpdateRef = Arc<Mutex<UpdateState>>;
 
 pub fn lock(s: &UpdateRef) -> std::sync::MutexGuard<'_, UpdateState> {
-    s.lock().unwrap_or_else(|e| e.into_inner())
+    s.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// 別のスレッドで確かめる。終わったら `done` を呼ぶ (画面の描き直しとログ)。
@@ -166,10 +166,10 @@ pub fn spawn_check(state: &UpdateRef, done: impl FnOnce(&Result<Option<Release>,
             s.checked_at = crate::win::now_hms();
             match &result {
                 Ok(r) => {
-                    s.latest = r.clone();
+                    s.latest.clone_from(r);
                     s.error.clear();
                 }
-                Err(e) => s.error = e.clone(),
+                Err(e) => s.error.clone_from(e),
             }
         }
         done(&result);

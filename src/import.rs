@@ -1,6 +1,6 @@
 //! pcyplite の設定 (`pcypLite.ini` と `Favorite.ini`) から、YP、プレイヤー、お気に入りを取り込む。
 //!
-//! pcyplite は Delphi 製で、ini は UTF-8 (BOM 付き) か Shift_JIS。
+//! pcyplite は Delphi 製で、ini は UTF-8 (BOM 付き) か `Shift_JIS`。
 //!
 //! `Favorite.ini` の `Flags` は、お気に入りの画面のチェックをビットにしたもの。
 //! 画面の「チャンネル名(1)」〜「ビットレート(9)」の番号が、そのままビットの位置になっている。
@@ -29,7 +29,7 @@ pub struct Section(HashMap<String, String>);
 
 impl Section {
     pub fn get(&self, key: &str) -> &str {
-        self.0.get(&key.to_ascii_lowercase()).map(String::as_str).unwrap_or("")
+        self.0.get(&key.to_ascii_lowercase()).map_or("", String::as_str)
     }
 }
 
@@ -80,7 +80,7 @@ pub struct Imported {
     pub filters: Vec<Item<Filter>>,
     pub yps: Vec<Item<YpEntry>>,
     pub players: Vec<Item<PlayerEntry>>,
-    /// PeerCast のアドレス (YP の `Host=`)
+    /// `PeerCast` のアドレス (YP の `Host=`)
     pub peercast: Option<Item<String>>,
     /// URL を開くブラウザ
     pub browser: Option<Item<String>>,
@@ -88,7 +88,7 @@ pub struct Imported {
     pub warnings: Vec<String>,
 }
 
-/// Delphi の TColor (`0x00BBGGRR`)。負の数はシステムの色 (窓の背景など) なので色なしとみなす。
+/// Delphi の `TColor` (`0x00BBGGRR`)。負の数はシステムの色 (窓の背景など) なので色なしとみなす。
 fn delphi_color(s: &str) -> Option<[u8; 3]> {
     let n: i64 = s.trim().parse().ok()?;
     if !(0..=0xFF_FFFF).contains(&n) {
@@ -128,7 +128,7 @@ pub fn favorite_to_filter(sec: &Section) -> Item<Filter> {
             if names.is_empty() {
                 lost.push(label);
             }
-            fields.extend(names.iter().map(|s| s.to_string()));
+            fields.extend(names.iter().map(std::string::ToString::to_string));
         }
     }
     if fields.is_empty() {
@@ -169,7 +169,7 @@ pub fn favorite_to_filter(sec: &Section) -> Item<Filter> {
 /// YP の URL を index.txt の URL にする (pcyplite はフォルダの形で持っている)
 pub fn yp_index_url(url: &str) -> String {
     let u = url.trim();
-    if u.ends_with('/') { format!("{}index.txt", u) } else { u.to_string() }
+    if u.ends_with('/') { format!("{u}index.txt") } else { u.to_string() }
 }
 
 /// URL を比べるための形 (http と https、大文字と小文字、末尾の / は同じとみなす)
@@ -202,24 +202,24 @@ pub fn load(dir: &Path, cur_filters: &[Filter], cur: &crate::config::Config) -> 
                 out.filters.push(item);
             }
         }
-        None => out.warnings.push(format!("{} がありません", FAVORITE_INI)),
+        None => out.warnings.push(format!("{FAVORITE_INI} がありません")),
     }
 
     let Some(ini) = read(MAIN_INI) else {
-        out.warnings.push(format!("{} がありません", MAIN_INI));
+        out.warnings.push(format!("{MAIN_INI} がありません"));
         return out;
     };
 
     let mut hosts: Vec<String> = Vec::new();
     if let Some(sec) = section(&ini, "YP") {
         for i in 0.. {
-            let url = sec.get(&format!("Url{}", i));
-            let title = sec.get(&format!("Title{}", i));
+            let url = sec.get(&format!("Url{i}"));
+            let title = sec.get(&format!("Title{i}"));
             if url.is_empty() && title.is_empty() {
                 break;
             }
-            let y = YpEntry { name: title.to_string(), url: yp_index_url(url), enabled: sec.get(&format!("Enabled{}", i)) != "0" };
-            let host = sec.get(&format!("Host{}", i)).trim();
+            let y = YpEntry { name: title.to_string(), url: yp_index_url(url), enabled: sec.get(&format!("Enabled{i}")) != "0" };
+            let host = sec.get(&format!("Host{i}")).trim();
             if !host.is_empty() {
                 hosts.push(host.to_string());
             }
@@ -247,12 +247,12 @@ pub fn load(dir: &Path, cur_filters: &[Filter], cur: &crate::config::Config) -> 
 
     if let Some(sec) = section(&ini, "Etc_Player") {
         for i in 0.. {
-            let ext = sec.get(&format!("Extension{}", i)).trim();
-            let exe = sec.get(&format!("FileName{}", i)).trim();
+            let ext = sec.get(&format!("Extension{i}")).trim();
+            let exe = sec.get(&format!("FileName{i}")).trim();
             if ext.is_empty() && exe.is_empty() {
                 break;
             }
-            let args = sec.get(&format!("Arguments{}", i)).trim();
+            let args = sec.get(&format!("Arguments{i}")).trim();
             let p = PlayerEntry { types: ext.to_string(), exe: exe.to_string(), args: convert_args(args) };
             let mut item = Item::new(p);
             let mut notes = Vec::new();
@@ -288,7 +288,7 @@ pub fn load(dir: &Path, cur_filters: &[Filter], cur: &crate::config::Config) -> 
 /// pcyplite の引数を pcyp-rust の書き方にする。
 ///
 /// pcyplite の `<stream/>` は /pls/ の URL なので、`<stream/>&pls=m3u` (m3u のプレイリスト) と書いてあることが多い。
-/// pcyp-rust の `<stream/>` は PeerCast タブで選んだ再生の URL (初期値は /stream/) なので、`$URL` だけにする。
+/// pcyp-rust の `<stream/>` は `PeerCast` タブで選んだ再生の URL (初期値は /stream/) なので、`$URL` だけにする。
 /// `<direct/>` は pcyp-rust に無いので消す。
 pub fn convert_args(args: &str) -> String {
     args.replace("<stream/>&pls=m3u", "$URL").replace("<direct/>", "")
@@ -335,11 +335,11 @@ pub fn apply(data: &Imported, mode: PlayerMode, cfg: &mut crate::config::Config,
         }
     }
     if let Some(p) = data.peercast.as_ref().filter(|i| i.checked) {
-        cfg.peercast.address = p.value.clone();
+        cfg.peercast.address.clone_from(&p.value);
         done.push("PeerCast のアドレス".into());
     }
     if let Some(b) = data.browser.as_ref().filter(|i| i.checked) {
-        cfg.browser = b.value.clone();
+        cfg.browser.clone_from(&b.value);
         done.push("ブラウザ".into());
     }
     if done.is_empty() { "取り込むものがありませんでした".into() } else { format!("pcyplite から {} を取り込みました", done.join("、")) }
@@ -438,7 +438,7 @@ mod tests {
     /// 実際の pcyplite のフォルダを読んで、一覧に出す内容を表示する。フォルダを環境変数で渡したときだけ動く。
     /// `PCYP_TEST_PCYPLITE=フォルダ cargo test live_pcyplite -- --ignored --nocapture`
     #[test]
-    #[ignore]
+    #[ignore = "実際の PCYP Lite のフォルダがいる"]
     fn live_pcyplite() {
         let Ok(dir) = std::env::var("PCYP_TEST_PCYPLITE") else { return };
         let data = load(Path::new(&dir), &[], &crate::config::Config::default());

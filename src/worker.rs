@@ -100,7 +100,7 @@ pub struct Worker {
 }
 
 pub fn lock(s: &SharedRef) -> std::sync::MutexGuard<'_, Shared> {
-    s.lock().unwrap_or_else(|e| e.into_inner())
+    s.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// 設定の YP の並びに合わせる。残った YP の一覧はそのまま持つ。
@@ -115,7 +115,7 @@ pub fn sync_yps(shared: &mut Shared, cfg: &Config) {
             bad_lines: BadLines::default(),
             updated: None,
         });
-        y.name = e.name.clone();
+        y.name.clone_from(&e.name);
         shared.yps.push(y);
     }
 }
@@ -126,7 +126,7 @@ impl Worker {
     }
 
     fn cfg(&self) -> Config {
-        self.config.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.config.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     fn run(self, rx: Receiver<Command>) {
@@ -149,7 +149,7 @@ impl Worker {
                 Ok(Command::Refresh { manual }) => {
                     let wait = lock(&self.shared).manual_wait();
                     if manual && wait > 0 {
-                        lock(&self.shared).log(false, format!("手動更新は前回から {} 秒空けてください (あと {} 秒)", MANUAL_INTERVAL_SEC, wait));
+                        lock(&self.shared).log(false, format!("手動更新は前回から {MANUAL_INTERVAL_SEC} 秒空けてください (あと {wait} 秒)"));
                         (self.repaint)();
                         continue;
                     }
@@ -178,7 +178,7 @@ impl Worker {
             sync_yps(&mut s, cfg);
             s.fetching = true;
             s.last_fetch = Some(Instant::now());
-            for y in s.yps.iter_mut() {
+            for y in &mut s.yps {
                 y.state = FetchState::Loading;
             }
             s.yps.iter().map(|y| (y.name.clone(), y.url.clone())).collect()
@@ -213,7 +213,7 @@ impl Worker {
                             if let Some(y) = s.yps.iter_mut().find(|y| &y.url == url) {
                                 y.state = FetchState::Error(e.clone());
                             }
-                            (true, format!("{}: 取得に失敗しました: {}", name, e))
+                            (true, format!("{name}: 取得に失敗しました: {e}"))
                         }
                     };
                     s.log(msg.0, msg.1);
@@ -234,7 +234,7 @@ impl Worker {
     /// NEW の印は、現れてから設定の時間 (`new_mark_min`) がたつまで残す。たったかどうかは取得のたびに調べるので、
     /// 印が消えるのはその時間を過ぎた次の取得のとき。0 分なら次の取得で消える。
     fn finish_fetch(&self, cfg: &Config, seen: &mut Seen) -> Vec<Channel> {
-        let filters = self.filters.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let filters = self.filters.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let (compiled, _) = filter::compile(&filters);
         let now = Instant::now();
         let mut s = lock(&self.shared);
@@ -267,7 +267,7 @@ impl Worker {
             present.extend(keys.iter().cloned());
             seen.per_yp.insert(y.url.clone(), keys);
         }
-        let keep = Duration::from_secs(cfg.new_mark_min as u64 * 60);
+        let keep = Duration::from_secs(u64::from(cfg.new_mark_min) * 60);
         seen.new_at.retain(|k, t| present.contains(k) && (*t == now || now.duration_since(*t) < keep));
         s.new_keys = seen.new_at.keys().cloned().collect();
         s.fetching = false;
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(lock(&w.shared).new_keys.len(), 2);
         // B が現れたのは 20 分前だったことにする。C はまだ新しい。A は初めからあるので NEW にならない
         let b = "22222222222222222222222222222222";
-        if let Some(t) = Instant::now().checked_sub(Duration::from_secs(20 * 60)) {
+        if let Some(t) = Instant::now().checked_sub(Duration::from_mins(20)) {
             seen.new_at.insert(b.into(), t);
             w.fetch_all(&cfg, &mut seen);
             let keys = lock(&w.shared).new_keys.clone();
