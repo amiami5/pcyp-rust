@@ -270,6 +270,20 @@ impl Default for Columns {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
+pub struct PinnedTabs {
+    pub favorite: bool,
+    pub all: bool,
+    pub new: bool,
+}
+
+impl Default for PinnedTabs {
+    fn default() -> Self {
+        PinnedTabs { favorite: true, all: true, new: true }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct ViewConfig {
     /// pcyplite のような 2 行表示
     pub two_line: bool,
@@ -283,6 +297,8 @@ pub struct ViewConfig {
     pub show_info_rows: bool,
     /// 無視のタブを出さない
     pub hide_ignored_tab: bool,
+    /// タブの帯でスクロールさせず、左に置いておくタブ
+    pub pinned_tabs: PinnedTabs,
     /// マウスのホイール 1 目盛りで一覧を何行進めるか
     pub scroll_rows: u32,
     /// 一覧で省略された文字に、カーソルを合わせたとき全文を出す
@@ -315,6 +331,7 @@ impl Default for ViewConfig {
             columns: Columns::default(),
             show_info_rows: true,
             hide_ignored_tab: true,
+            pinned_tabs: PinnedTabs::default(),
             scroll_rows: 2,
             show_tooltips: false,
             show_countdown: true,

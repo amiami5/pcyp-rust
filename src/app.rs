@@ -1108,8 +1108,36 @@ impl App {
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui, cfg: &Config) {
-        let yps: Vec<(String, String, FetchState)> =
-            lock(&self.shared).yps.iter().map(|y| (y.name.clone(), y.url.clone(), y.state.clone())).collect();
+        let c = &self.counts;
+        let pin = &cfg.view.pinned_tabs;
+        // (タブ, 見出し, カーソルを合わせたときの説明, 左に置いておく)
+        let mut tabs: Vec<(Tab, RichText, Option<String>, bool)> = vec![
+            (Tab::Favorite, RichText::new(format!("★ お気に入り ({})", c.favorite)), None, pin.favorite),
+            (Tab::All, RichText::new(format!("すべて ({})", c.all)), None, pin.all),
+            (Tab::New, RichText::new(format!("🆕 新着 ({})", c.new)), Some("新しく始まったチャンネル (NEW の印が付いているもの)".into()), pin.new),
+        ];
+        for (i, y) in lock(&self.shared).yps.iter().enumerate() {
+            let n = c.per_yp.get(i).copied().unwrap_or(0);
+            let (label, tip) = match &y.state {
+                FetchState::Error(e) => (RichText::new(format!("⚠ {} ({})", y.name, n)).color(Color32::from_rgb(220, 60, 60)), e.clone()),
+                FetchState::Loading => (RichText::new(format!("{} …", y.name)), "取得中".to_string()),
+                _ => (RichText::new(format!("{} ({})", y.name, n)), y.url.clone()),
+            };
+            tabs.push((Tab::Yp(y.url.clone()), label, Some(tip), false));
+        }
+        if !cfg.view.hide_ignored_tab {
+            tabs.push((Tab::Ignored, RichText::new(format!("🚫 無視 ({})", c.ignored)), None, false));
+        }
+        let tab_button = |ui: &mut egui::Ui, tab: &mut Tab, (t, label, tip, _): &(Tab, RichText, Option<String>, bool)| {
+            let mut r = ui.selectable_label(tab == t, label.clone());
+            if let Some(tip) = tip {
+                r = r.on_hover_text(tip);
+            }
+            if r.clicked() {
+                *tab = t.clone();
+            }
+            r
+        };
         let bar = &mut self.tab_bar;
         let arrow = egui::vec2(ui.spacing().interact_size.y, ui.spacing().interact_size.y);
         // ◀ ▶ の 2 つ分の幅
@@ -1117,8 +1145,17 @@ impl App {
         let page = |bar: &TabBar, w: f32, dir: f32| (bar.offset + dir * (w * 0.8).max(40.0)).clamp(0.0, bar.max_offset);
         // この描画で選ばれているタブ (クリックで変わるのは次の描画から)
         let shown = self.tab.clone();
+        let mut tab = self.tab.clone();
         ui.horizontal(|ui| {
-            let full_w = ui.available_width();
+            let mut pinned = tabs.iter().filter(|t| t.3).peekable();
+            if pinned.peek().is_some() {
+                for t in pinned {
+                    tab_button(ui, &mut tab, t);
+                }
+                ui.separator();
+            }
+            // 上の段が窓に入りきらないと available_width は窓より広くなるので、見えている所までにする
+            let full_w = ui.available_width().min(ui.clip_rect().right() - ui.cursor().left());
             let area_w = if bar.overflow { full_w - arrows_w } else { full_w };
             if bar.overflow
                 && ui.add_enabled(bar.offset > 0.5, egui::Button::new("◀").min_size(arrow)).clicked()
@@ -1134,39 +1171,12 @@ impl App {
                 let left = ui.max_rect().left();
                 let mut sel_x = None;
                 ui.horizontal(|ui| {
-                    let c = &self.counts;
-                    let mut tab = self.tab.clone();
-                    let mut item = |r: egui::Response, t: Tab, tab: &mut Tab| {
-                        if t == shown {
+                    for t in tabs.iter().filter(|t| !t.3) {
+                        let r = tab_button(ui, &mut tab, t);
+                        if t.0 == shown {
                             sel_x = Some((r.rect.left() - left, r.rect.right() - left));
                         }
-                        if r.clicked() {
-                            *tab = t;
-                        }
-                    };
-                    let r = ui.selectable_label(tab == Tab::Favorite, format!("★ お気に入り ({})", c.favorite));
-                    item(r, Tab::Favorite, &mut tab);
-                    let r = ui.selectable_label(tab == Tab::All, format!("すべて ({})", c.all));
-                    item(r, Tab::All, &mut tab);
-                    let r = ui
-                        .selectable_label(tab == Tab::New, format!("🆕 新着 ({})", c.new))
-                        .on_hover_text("新しく始まったチャンネル (NEW の印が付いているもの)");
-                    item(r, Tab::New, &mut tab);
-                    for (i, (name, url, state)) in yps.iter().enumerate() {
-                        let n = c.per_yp.get(i).copied().unwrap_or(0);
-                        let (label, tip) = match state {
-                            FetchState::Error(e) => (RichText::new(format!("⚠ {} ({})", name, n)).color(Color32::from_rgb(220, 60, 60)), e.clone()),
-                            FetchState::Loading => (RichText::new(format!("{} …", name)), "取得中".to_string()),
-                            _ => (RichText::new(format!("{} ({})", name, n)), url.clone()),
-                        };
-                        let r = ui.selectable_label(tab == Tab::Yp(url.clone()), label).on_hover_text(tip);
-                        item(r, Tab::Yp(url.clone()), &mut tab);
                     }
-                    if !cfg.view.hide_ignored_tab {
-                        let r = ui.selectable_label(tab == Tab::Ignored, format!("🚫 無視 ({})", c.ignored));
-                        item(r, Tab::Ignored, &mut tab);
-                    }
-                    self.tab = tab;
                 });
                 sel_x
             });
@@ -1204,6 +1214,7 @@ impl App {
             }
             bar.overflow = overflow;
         });
+        self.tab = tab;
         if cfg.view.hide_ignored_tab && self.tab == Tab::Ignored {
             self.tab = Tab::All;
         }
@@ -2839,6 +2850,12 @@ fn settings_view(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.checkbox(&mut cfg.view.dark, "ダークモード");
     ui.checkbox(&mut cfg.view.show_info_rows, "YP のお知らせの行を表示する");
     ui.checkbox(&mut cfg.view.hide_ignored_tab, "無視のタブを隠す");
+    ui.horizontal(|ui| {
+        ui.label("スクロールさせずに左に置くタブ:");
+        ui.checkbox(&mut cfg.view.pinned_tabs.favorite, "★ お気に入り");
+        ui.checkbox(&mut cfg.view.pinned_tabs.all, "すべて");
+        ui.checkbox(&mut cfg.view.pinned_tabs.new, "🆕 新着");
+    });
     ui.checkbox(&mut cfg.view.show_tooltips, "一覧で省略された文字に、カーソルを合わせると全文を出す (ツールチップ)");
     ui.separator();
     ui.horizontal(|ui| {
