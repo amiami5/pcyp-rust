@@ -428,6 +428,7 @@ pub struct App {
     notices: Vec<String>,
 
     tab: Tab,
+    tab_bar: TabBar,
     search: String,
     sort: (SortKey, bool),
     /// お気に入りを上にまとめる
@@ -468,6 +469,20 @@ pub struct App {
     last_size: Option<[f32; 2]>,
     closing: bool,
     first_frame: bool,
+}
+
+/// タブの帯の横スクロール。入りきらないときは両端に ◀ ▶ を出し、選んだタブが隠れないように動かす
+#[derive(Default)]
+struct TabBar {
+    /// 次の描画で付けるスクロール位置
+    goto: Option<f32>,
+    /// 前の描画でのスクロール位置と、その最大
+    offset: f32,
+    max_offset: f32,
+    /// 前の描画でタブが入りきらなかった (◀ ▶ を出す)
+    overflow: bool,
+    /// 選んだタブを見えるようにしたときの (タブ, 帯の幅)。どちらかが変わったらまた見えるようにする
+    revealed: Option<(Tab, f32)>,
 }
 
 fn read<T: Clone>(l: &RwLock<T>) -> T {
@@ -515,6 +530,7 @@ impl App {
             has_bold: init.has_bold,
             notices: init.notices,
             tab: Tab::All,
+            tab_bar: TabBar::default(),
             search: String::new(),
             sort: (SortKey::from_key(&cfg.view.sort_key), cfg.view.sort_desc),
             fav_first: cfg.view.favorites_first,
@@ -1094,31 +1110,99 @@ impl App {
     fn tab_bar(&mut self, ui: &mut egui::Ui, cfg: &Config) {
         let yps: Vec<(String, String, FetchState)> =
             lock(&self.shared).yps.iter().map(|y| (y.name.clone(), y.url.clone(), y.state.clone())).collect();
-        egui::ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let c = &self.counts;
-                let mut tab = self.tab.clone();
-                ui.selectable_value(&mut tab, Tab::Favorite, format!("★ お気に入り ({})", c.favorite));
-                ui.selectable_value(&mut tab, Tab::All, format!("すべて ({})", c.all));
-                ui.selectable_value(&mut tab, Tab::New, format!("🆕 新着 ({})", c.new))
-                    .on_hover_text("新しく始まったチャンネル (NEW の印が付いているもの)");
-                for (i, (name, url, state)) in yps.iter().enumerate() {
-                    let n = c.per_yp.get(i).copied().unwrap_or(0);
-                    let (label, tip) = match state {
-                        FetchState::Error(e) => (RichText::new(format!("⚠ {} ({})", name, n)).color(Color32::from_rgb(220, 60, 60)), e.clone()),
-                        FetchState::Loading => (RichText::new(format!("{} …", name)), "取得中".to_string()),
-                        _ => (RichText::new(format!("{} ({})", name, n)), url.clone()),
+        let bar = &mut self.tab_bar;
+        let arrow = egui::vec2(ui.spacing().interact_size.y, ui.spacing().interact_size.y);
+        // ◀ ▶ の 2 つ分の幅
+        let arrows_w = 2.0 * (arrow.x + ui.spacing().item_spacing.x);
+        let page = |bar: &TabBar, w: f32, dir: f32| (bar.offset + dir * (w * 0.8).max(40.0)).clamp(0.0, bar.max_offset);
+        // この描画で選ばれているタブ (クリックで変わるのは次の描画から)
+        let shown = self.tab.clone();
+        ui.horizontal(|ui| {
+            let full_w = ui.available_width();
+            let area_w = if bar.overflow { full_w - arrows_w } else { full_w };
+            if bar.overflow
+                && ui.add_enabled(bar.offset > 0.5, egui::Button::new("◀").min_size(arrow)).clicked()
+            {
+                bar.goto = Some(page(bar, area_w, -1.0));
+            }
+            let mut area = egui::ScrollArea::horizontal().id_salt("tabs").max_width(area_w);
+            if let Some(x) = bar.goto.take() {
+                area = area.horizontal_scroll_offset(x);
+            }
+            let out = area.show(ui, |ui| {
+                // 中身の左端。タブの位置はここからの距離で返す
+                let left = ui.max_rect().left();
+                let mut sel_x = None;
+                ui.horizontal(|ui| {
+                    let c = &self.counts;
+                    let mut tab = self.tab.clone();
+                    let mut item = |r: egui::Response, t: Tab, tab: &mut Tab| {
+                        if t == shown {
+                            sel_x = Some((r.rect.left() - left, r.rect.right() - left));
+                        }
+                        if r.clicked() {
+                            *tab = t;
+                        }
                     };
-                    let r = ui.selectable_label(tab == Tab::Yp(url.clone()), label).on_hover_text(tip);
-                    if r.clicked() {
-                        tab = Tab::Yp(url.clone());
+                    let r = ui.selectable_label(tab == Tab::Favorite, format!("★ お気に入り ({})", c.favorite));
+                    item(r, Tab::Favorite, &mut tab);
+                    let r = ui.selectable_label(tab == Tab::All, format!("すべて ({})", c.all));
+                    item(r, Tab::All, &mut tab);
+                    let r = ui
+                        .selectable_label(tab == Tab::New, format!("🆕 新着 ({})", c.new))
+                        .on_hover_text("新しく始まったチャンネル (NEW の印が付いているもの)");
+                    item(r, Tab::New, &mut tab);
+                    for (i, (name, url, state)) in yps.iter().enumerate() {
+                        let n = c.per_yp.get(i).copied().unwrap_or(0);
+                        let (label, tip) = match state {
+                            FetchState::Error(e) => (RichText::new(format!("⚠ {} ({})", name, n)).color(Color32::from_rgb(220, 60, 60)), e.clone()),
+                            FetchState::Loading => (RichText::new(format!("{} …", name)), "取得中".to_string()),
+                            _ => (RichText::new(format!("{} ({})", name, n)), url.clone()),
+                        };
+                        let r = ui.selectable_label(tab == Tab::Yp(url.clone()), label).on_hover_text(tip);
+                        item(r, Tab::Yp(url.clone()), &mut tab);
                     }
-                }
-                if !cfg.view.hide_ignored_tab {
-                    ui.selectable_value(&mut tab, Tab::Ignored, format!("🚫 無視 ({})", c.ignored));
-                }
-                self.tab = tab;
+                    if !cfg.view.hide_ignored_tab {
+                        let r = ui.selectable_label(tab == Tab::Ignored, format!("🚫 無視 ({})", c.ignored));
+                        item(r, Tab::Ignored, &mut tab);
+                    }
+                    self.tab = tab;
+                });
+                sel_x
             });
+            let view_w = out.inner_rect.width();
+            bar.offset = out.state.offset.x;
+            bar.max_offset = (out.content_size.x - view_w).max(0.0);
+            // ◀ ▶ を出しているときは、それを除いた幅で比べる (出す・消すを行ったり来たりしないように)
+            let room = if bar.overflow { view_w + arrows_w } else { view_w };
+            let overflow = out.content_size.x > room + 0.5;
+            if bar.overflow && ui.add_enabled(bar.offset < bar.max_offset - 0.5, egui::Button::new("▶").min_size(arrow)).clicked() {
+                bar.goto = Some(page(bar, view_w, 1.0));
+            }
+            // 選んだタブが変わったか、帯の幅が変わったら、選んだタブが隠れていれば見える所まで動かす
+            let key = (shown.clone(), full_w);
+            if bar.goto.is_none()
+                && overflow == bar.overflow
+                && bar.revealed.as_ref() != Some(&key)
+                && let Some((x0, x1)) = out.inner
+            {
+                let pad = ui.spacing().item_spacing.x * 4.0;
+                let to = if x0 < bar.offset {
+                    Some(x0 - pad)
+                } else if x1 > bar.offset + view_w {
+                    Some(x1 - view_w + pad)
+                } else {
+                    None
+                };
+                if let Some(x) = to {
+                    bar.goto = Some(x.clamp(0.0, bar.max_offset));
+                }
+                bar.revealed = Some(key);
+            }
+            if bar.goto.is_some() || overflow != bar.overflow {
+                ui.ctx().request_repaint();
+            }
+            bar.overflow = overflow;
         });
         if cfg.view.hide_ignored_tab && self.tab == Tab::Ignored {
             self.tab = Tab::All;
