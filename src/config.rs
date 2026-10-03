@@ -297,6 +297,8 @@ pub struct ViewConfig {
     pub show_info_rows: bool,
     /// 無視のタブを出さない
     pub hide_ignored_tab: bool,
+    /// 新着のタブを出さない
+    pub hide_new_tab: bool,
     /// タブの帯でスクロールさせず、左に置いておくタブ
     pub pinned_tabs: PinnedTabs,
     /// マウスのホイール 1 目盛りで一覧を何行進めるか
@@ -331,6 +333,7 @@ impl Default for ViewConfig {
             columns: Columns::default(),
             show_info_rows: true,
             hide_ignored_tab: true,
+            hide_new_tab: false,
             pinned_tabs: PinnedTabs::default(),
             scroll_rows: 2,
             show_tooltips: false,

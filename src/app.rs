@@ -1115,8 +1115,10 @@ impl App {
         let mut tabs: Vec<(Tab, RichText, Option<String>, bool)> = vec![
             (Tab::Favorite, RichText::new(format!("★ お気に入り ({})", c.favorite)), None, pin.favorite),
             (Tab::All, RichText::new(format!("すべて ({})", c.all)), None, pin.all),
-            (Tab::New, RichText::new(format!("🆕 新着 ({})", c.new)), Some("新しく始まったチャンネル (NEW の印が付いているもの)".into()), pin.new),
         ];
+        if !cfg.view.hide_new_tab {
+            tabs.push((Tab::New, RichText::new(format!("🆕 新着 ({})", c.new)), Some("新しく始まったチャンネル (NEW の印が付いているもの)".into()), pin.new));
+        }
         for (i, y) in lock(&self.shared).yps.iter().enumerate() {
             let n = c.per_yp.get(i).copied().unwrap_or(0);
             let (label, tip) = match &y.state {
@@ -1216,7 +1218,7 @@ impl App {
             bar.overflow = overflow;
         });
         self.tab = tab;
-        if cfg.view.hide_ignored_tab && self.tab == Tab::Ignored {
+        if cfg.view.hide_ignored_tab && self.tab == Tab::Ignored || cfg.view.hide_new_tab && self.tab == Tab::New {
             self.tab = Tab::All;
         }
     }
@@ -2851,11 +2853,12 @@ fn settings_view(ui: &mut egui::Ui, cfg: &mut Config) {
     ui.checkbox(&mut cfg.view.dark, "ダークモード");
     ui.checkbox(&mut cfg.view.show_info_rows, "YP のお知らせの行を表示する");
     ui.checkbox(&mut cfg.view.hide_ignored_tab, "無視のタブを隠す");
+    ui.checkbox(&mut cfg.view.hide_new_tab, "新着のタブを隠す");
     ui.horizontal(|ui| {
         ui.label("スクロールさせずに左に置くタブ:");
         ui.checkbox(&mut cfg.view.pinned_tabs.favorite, "★ お気に入り");
         ui.checkbox(&mut cfg.view.pinned_tabs.all, "すべて");
-        ui.checkbox(&mut cfg.view.pinned_tabs.new, "🆕 新着");
+        ui.add_enabled(!cfg.view.hide_new_tab, egui::Checkbox::new(&mut cfg.view.pinned_tabs.new, "🆕 新着"));
     });
     ui.checkbox(&mut cfg.view.show_tooltips, "一覧で省略された文字に、カーソルを合わせると全文を出す (ツールチップ)");
     ui.separator();
