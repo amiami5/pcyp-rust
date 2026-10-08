@@ -108,6 +108,7 @@ pub fn is_http_url(s: &str) -> bool {
 ///
 /// ブラウザで開くと Sec-Fetch-Site: none になり、PeerCast などの手元のサーバーが
 /// 自分で開いたものと見分けられないので、手元や LAN を指すものは捨てる。
+/// 名前を引くと手元を指すもの (127.0.0.1 を返すドメインなど) は、ここでは見分けられない。
 pub fn contact_url_or_empty(s: &str) -> String {
     if is_safe_contact_url(s) { s.to_string() } else { String::new() }
 }
@@ -142,8 +143,14 @@ fn is_safe_contact_url(s: &str) -> bool {
     match parse_browser_ipv4(host) {
         Some(Some(a)) => is_public_v4(a),
         Some(None) => false,
-        None => true,
+        None => is_public_name(host),
     }
+}
+
+/// LAN の中でだけ引く名前でないか。点のない名前 (Windows は LAN の PC の名前として引く) と、
+/// `.local` (mDNS)・`.lan`・`.home.arpa`・`.internal` で終わる名前は、LAN を指す。
+fn is_public_name(host: &str) -> bool {
+    host.contains('.') && ![".local", ".lan", ".home.arpa", ".internal"].iter().any(|s| host.ends_with(s))
 }
 
 /// ブラウザ (WHATWG URL) と同じ読み方で IPv4 として読む。
@@ -517,6 +524,12 @@ mod tests {
             "http://256.0.0.1/",
             "http:///127.0.0.1/",
             "http://\\127.0.0.1/",
+            "http://mypc:7144/",
+            "http://MyPC./",
+            "http://nas.local/",
+            "http://router.lan/",
+            "http://pc.home.arpa/",
+            "http://svc.internal/",
             "http://example.com/a b",
             " http://example.com/",
             "http://example.com/\"x",
@@ -532,6 +545,7 @@ mod tests {
             "http://8.8.8.8:7144/",
             "http://[2001:db8::1]/",
             "http://127.0.0.1.example.com/",
+            "http://example.local.com/",
             "http://example.com/?u=http://127.0.0.1/",
         ] {
             assert_eq!(contact_url_or_empty(good), good);
