@@ -8,6 +8,11 @@
 #
 # 下書きを公開するとタグが付いて、もう一度このワークフローが動く。そのときは、リリースに
 # もう zip があればビルドしないで終わる (公開した zip を置き換えない)。手で動かしたときは毎回作り直す。
+#
+# 書き込みのできるトークンは、ビルドするジョブに持たせない。同じジョブの中だと、step の env から外しても、
+# cargo test / build で動く依存クレートの build.rs などが、ランナーのメモリや $GITHUB_ENV・$GITHUB_PATH
+# (後の step の gh を差し替えられる) を通して取れるため。ビルドは読むだけのトークンで行い、zip は
+# 成果物にして、gh しか動かさないジョブで添付する。
 
 name: release
 
@@ -20,20 +25,25 @@ on:
         description: "添付するリリースのタグ (例 v0.1.0)"
         required: true
 
-permissions:
-  contents: write
+# 権限は、ジョブごとに要るものだけを付ける
+permissions: {}
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  ZIP: pcyp-rust-${{ github.event.inputs.tag || github.ref_name }}-windows-x64.zip
+  GH_REPO: ${{ github.repository }}
 
 jobs:
-  build:
-    runs-on: windows-latest
-    env:
-      TAG: ${{ github.event.inputs.tag || github.ref_name }}
-      ZIP: pcyp-rust-${{ github.event.inputs.tag || github.ref_name }}-windows-x64.zip
-      GH_REPO: ${{ github.repository }}
-    # 書き込みのできるトークンは gh を使う step にだけ渡す
-    # (cargo test / build で動く依存クレートの build.rs などから読めないように)
+  check:
+    runs-on: ubuntu-latest
+    # 下書きのリリースも見るので、書き込みの権限が要る (gh しか動かさない)
+    permissions:
+      contents: write
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
     steps:
       - name: もう zip があるか確かめる (タグの push のときだけ)
+        id: check
         if: github.event_name == 'push'
         shell: pwsh
         env:
@@ -42,30 +52,32 @@ jobs:
           $names = gh release view $env:TAG --json assets --jq '.assets[].name' 2>$null
           if ($LASTEXITCODE -eq 0 -and ($names -contains $env:ZIP)) {
             "リリース $env:TAG にはもう $env:ZIP があるので、ビルドしません"
-            "SKIP=true" >> $env:GITHUB_ENV
+            "skip=true" >> $env:GITHUB_OUTPUT
           }
           exit 0
 
+  build:
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
       - uses: actions/checkout@v5
-        if: env.SKIP != 'true'
         with:
           # トークンを git の設定に残さない
           persist-credentials: false
 
       - name: Rust の準備
-        if: env.SKIP != 'true'
         run: rustup toolchain install stable --profile minimal && rustup default stable
 
       - name: テスト
-        if: env.SKIP != 'true'
         run: cargo test --locked
 
       - name: ビルド
-        if: env.SKIP != 'true'
         run: cargo build --release --locked
 
       - name: zip にまとめる
-        if: env.SKIP != 'true'
         shell: pwsh
         run: |
           $name = [IO.Path]::GetFileNameWithoutExtension($env:ZIP)
@@ -73,8 +85,26 @@ jobs:
           Copy-Item target/release/pcyp-rust.exe, LICENSE, README.md $name
           Compress-Archive -Path $name -DestinationPath $env:ZIP -Force
 
+      - name: zip を次のジョブに渡す
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-zip
+          path: ${{ env.ZIP }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: zip を受け取る
+        uses: actions/download-artifact@v8
+        with:
+          name: release-zip
+
       - name: リリースに添付する
-        if: env.SKIP != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
