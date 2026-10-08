@@ -604,10 +604,14 @@ impl App {
         std::thread::Builder::new()
             .name("peercast-monitor".into())
             .spawn(move || {
+                let mut probe = peercast::AgentProbe::default();
                 loop {
                     let pc = read(&config).peercast;
                     let running = peercast::is_running(&pc);
-                    let agent = if running { Rpc::new(&pc).version_info().map(|v| v.agent).unwrap_or_default() } else { String::new() };
+                    if !running {
+                        probe.reset();
+                    }
+                    let agent = if running { probe.agent(&pc) } else { String::new() };
                     // ステータスバーの表示が変わるときだけ描き直す
                     let changed = {
                         let mut s = status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

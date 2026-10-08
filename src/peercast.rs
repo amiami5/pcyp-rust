@@ -138,7 +138,7 @@ impl Rpc {
             Ok(v) => v,
             Err(_) => self.call("getVersionInfo", json!([]))?,
         };
-        let agent = v.get("agentName").and_then(Value::as_str).unwrap_or("").to_string();
+        let agent = agent_name(&v);
         Ok(VersionInfo { kind: detect_kind(&agent), agent })
     }
 
@@ -153,6 +153,46 @@ impl Rpc {
 
     pub fn bump_channel(&self, id: &str) -> Result<(), String> {
         self.call("bumpChannel", json!({"channelId": id})).map(|_| ())
+    }
+}
+
+fn agent_name(v: &Value) -> String {
+    v.get("agentName").and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+/// 見張りが 10 秒ごとに聞く、`PeerCast` の種類と版 (agentName)。
+///
+/// 毎回パスワードを送らないように、まずパスワードなしで聞く。それで答えない `PeerCast` (LAN の `PeerCastStation` など) には、
+/// 動き始めてから 1 回だけパスワード付きで聞き、止まるか設定が変わるまでは、その答えを使う。
+#[derive(Default)]
+pub struct AgentProbe {
+    /// パスワード付きで聞いたときの設定と、その答え
+    asked: Option<(PeerCastConfig, String)>,
+}
+
+impl AgentProbe {
+    /// 動いている `PeerCast` の agentName。わからなければ空。
+    pub fn agent(&mut self, cfg: &PeerCastConfig) -> String {
+        if let Some((c, agent)) = &self.asked
+            && c == cfg
+        {
+            return agent.clone();
+        }
+        let anonymous = PeerCastConfig { user: String::new(), password: String::new(), ..cfg.clone() };
+        if let Ok(v) = Rpc::new(&anonymous).version_info() {
+            return v.agent;
+        }
+        if cfg.user.is_empty() && cfg.password.is_empty() {
+            return String::new();
+        }
+        let agent = Rpc::new(cfg).call("getVersionInfo", json!([])).map(|v| agent_name(&v)).unwrap_or_default();
+        self.asked = Some((cfg.clone(), agent.clone()));
+        agent
+    }
+
+    /// `PeerCast` が止まったら呼ぶ。次に動いたときに、また聞く
+    pub fn reset(&mut self) {
+        self.asked = None;
     }
 }
 
@@ -269,6 +309,72 @@ mod tests {
         let c = RelayChannel::from_json(&v);
         assert_eq!((c.id.as_str(), c.name.as_str(), c.status.as_str()), ("ABC", "n", "Receiving"));
         assert_eq!((c.listeners, c.relays, c.bitrate), (2, 1, 500));
+    }
+
+    /// 認証の付いていない要求には 401、付いている要求には getVersionInfo の答えを返すサーバー。
+    /// 受け取った要求の 1 行目と、認証が付いていたかを残す
+    fn auth_server() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = log.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let mut s = s.unwrap();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut first = String::new();
+                r.read_line(&mut first).unwrap();
+                let (mut auth, mut len) = (false, 0);
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    let line = line.to_ascii_lowercase();
+                    auth |= line.starts_with("authorization:");
+                    if let Some(v) = line.strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                }
+                // 本文を読み残して閉じると、応答が届かないことがある
+                r.read_exact(&mut vec![0; len]).unwrap();
+                seen.lock().unwrap().push(format!("{} auth={auth}", first.trim_end()));
+                let resp = if auth {
+                    let body = r#"{"jsonrpc":"2.0","id":1,"result":{"agentName":"PeerCastStation/3.1.0"}}"#;
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                } else {
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                };
+                s.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+        (port, log)
+    }
+
+    #[test]
+    fn monitor_sends_password_once() {
+        let (port, log) = auth_server();
+        let cfg = PeerCastConfig { address: format!("127.0.0.1:{port}"), user: "u".into(), password: "p".into(), ..Default::default() };
+        let mut probe = AgentProbe::default();
+        // パスワードなしの GET と POST に答えないので、1 回だけパスワード付きで聞く
+        assert_eq!(probe.agent(&cfg), "PeerCastStation/3.1.0");
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["GET /api/1 HTTP/1.1 auth=false", "POST /api/1 HTTP/1.1 auth=false", "POST /api/1?pass=p HTTP/1.1 auth=true"]
+        );
+        // 次からは聞かずに、その答えを使う
+        assert_eq!(probe.agent(&cfg), "PeerCastStation/3.1.0");
+        assert_eq!(log.lock().unwrap().len(), 3);
+        // 止まってまた動いたときと、設定が変わったときは、また聞く
+        probe.reset();
+        assert_eq!(probe.agent(&cfg), "PeerCastStation/3.1.0");
+        assert_eq!(log.lock().unwrap().len(), 6);
+        probe.agent(&PeerCastConfig { password: "q".into(), ..cfg.clone() });
+        assert_eq!(log.lock().unwrap().len(), 9);
+        // パスワードがなければ、パスワードなしで聞くだけ
+        assert_eq!(AgentProbe::default().agent(&PeerCastConfig { user: String::new(), password: String::new(), ..cfg }), "");
+        assert!(log.lock().unwrap()[9..].iter().all(|l| l.ends_with("auth=false")));
     }
 
     /// 実際の `PeerCast` につなぐテスト。`PCYP_TEST_PEERCAST=ホスト:ポート cargo test -- --ignored` で動かす。
